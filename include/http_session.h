@@ -37,6 +37,7 @@ namespace http_file_server{
         static bool parse_range(const std::string& range_header, std::uintmax_t file_size,
                                std::uintmax_t& start, std::uintmax_t& end);
         static std::string html_escape(const std::string& text);
+        static std::string json_escape(const std::string& text);
     public:
         HttpSession(asio::ip::tcp::socket socket);
 

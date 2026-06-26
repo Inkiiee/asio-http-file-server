@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <chrono>
+#include <ctime>
 #include <utility>
 #include <vector>
 #include <string>
@@ -295,30 +297,11 @@ awaitable<void> HttpSession::send_file_response(const fs::path& file_path,
 }
 
 // ============================================================
-//  Directory listing
+//  Directory listing (JSON)
 // ============================================================
 awaitable<void> HttpSession::send_directory_listing(const fs::path& dir_path,
                                                      const u8string& request_path){
-    string display_path(reinterpret_cast<const char*>(request_path.data()), request_path.size());
-
-    ostringstream html;
-    html << "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
-         << "<title>Index of " << html_escape(display_path) << "</title>\n"
-         << "<style>\n"
-         << "body { font-family: monospace; margin: 20px; }\n"
-         << "a { text-decoration: none; color: #0066cc; }\n"
-         << "a:hover { text-decoration: underline; }\n"
-         << "table { border-collapse: collapse; }\n"
-         << "td { padding: 4px 16px; }\n"
-         << ".size { text-align: right; color: #666; }\n"
-         << "</style>\n</head>\n<body>\n"
-         << "<h1>Index of " << html_escape(display_path) << "</h1>\n"
-         << "<hr>\n<table>\n";
-
-    // Parent directory link
-    if(request_path != u8"/"){
-        html << "<tr><td><a href=\"../\">../</a></td><td class=\"size\">-</td></tr>\n";
-    }
+    string req_path_str(reinterpret_cast<const char*>(request_path.data()), request_path.size());
 
     // Collect & sort entries (directories first, then alphabetically)
     vector<fs::directory_entry> entries;
@@ -333,49 +316,72 @@ awaitable<void> HttpSession::send_directory_listing(const fs::path& dir_path,
             return a.path().filename() < b.path().filename();
         });
 
+    ostringstream json;
+    json << "[\n";
+
+    bool first = true;
     for(const auto& entry : entries){
         string name = entry.path().filename().string();
         bool is_dir = entry.is_directory();
 
-        // URL-encode the name for the href
+        // URL path for GET request
         u8string u8name(reinterpret_cast<const char8_t*>(name.data()), name.size());
         auto encoded = url_encode(u8name);
         string href(encoded.begin(), encoded.end());
+        string url_path = req_path_str + href;
+        if(is_dir)
+            url_path += "/";
 
-        string display_name = html_escape(name);
-        if(is_dir){
-            display_name += "/";
-            href += "/";
-        }
-
-        // Human-readable file size
-        string size_str = "-";
+        // File size (0 for directories)
+        uintmax_t fsize = 0;
         if(!is_dir){
             error_code sec;
-            auto fsize = entry.file_size(sec);
-            if(!sec){
-                if(fsize < 1024)
-                    size_str = to_string(fsize) + " B";
-                else if(fsize < 1024 * 1024)
-                    size_str = to_string(fsize / 1024) + " KB";
-                else if(fsize < 1024ULL * 1024 * 1024)
-                    size_str = to_string(fsize / (1024 * 1024)) + " MB";
-                else
-                    size_str = to_string(fsize / (1024ULL * 1024 * 1024)) + " GB";
+            fsize = entry.file_size(sec);
+            if(sec) fsize = 0;
+        }
+
+        // Extension (empty for directories)
+        string extension;
+        if(!is_dir){
+            extension = entry.path().extension().string();
+        }
+
+        // Last modified time
+        string mtime_str;
+        {
+            error_code tec;
+            auto ftime = entry.last_write_time(tec);
+            if(!tec){
+                auto sctp = chrono::time_point_cast<chrono::system_clock::duration>(
+                    ftime - fs::file_time_type::clock::now() + chrono::system_clock::now());
+                auto tt = chrono::system_clock::to_time_t(sctp);
+                struct tm tm_buf;
+                localtime_r(&tt, &tm_buf);
+                char time_buf[20];
+                strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+                mtime_str = time_buf;
             }
         }
 
-        html << "<tr><td><a href=\"" << href << "\">"
-             << display_name << "</a></td>"
-             << "<td class=\"size\">" << size_str << "</td></tr>\n";
+        if(!first) json << ",\n";
+        first = false;
+
+        json << "  {"
+             << "\"name\":\"" << json_escape(name) << "\","
+             << "\"path\":\"" << json_escape(url_path) << "\","
+             << "\"is_directory\":" << (is_dir ? "true" : "false") << ","
+             << "\"size\":" << fsize << ","
+             << "\"extension\":\"" << json_escape(extension) << "\","
+             << "\"last_modified\":\"" << mtime_str << "\""
+             << "}";
     }
 
-    html << "</table>\n<hr>\n</body>\n</html>\n";
+    json << "\n]";
 
     vector<pair<string, string>> h;
-    h.emplace_back("Content-Type", "text/html; charset=utf-8");
+    h.emplace_back("Content-Type", "application/json; charset=utf-8");
     h.emplace_back("Connection", "close");
-    co_await send_response(200, "OK", h, html.str());
+    co_await send_response(200, "OK", h, json.str());
 }
 
 // ============================================================
@@ -561,6 +567,25 @@ string HttpSession::html_escape(const string& text){
             case '"':  result += "&quot;"; break;
             case '\'': result += "&#39;";  break;
             default:   result += c;        break;
+        }
+    }
+    return result;
+}
+
+// ============================================================
+//  JSON string escaping
+// ============================================================
+string HttpSession::json_escape(const string& text){
+    string result;
+    result.reserve(text.size());
+    for(char c : text){
+        switch(c){
+            case '"':  result += "\\\""; break;
+            case '\\': result += "\\\\"; break;
+            case '\n': result += "\\n";  break;
+            case '\r': result += "\\r";  break;
+            case '\t': result += "\\t";  break;
+            default:   result += c;      break;
         }
     }
     return result;
