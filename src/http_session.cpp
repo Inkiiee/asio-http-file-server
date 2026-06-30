@@ -26,8 +26,9 @@ namespace fs = std::filesystem;
 // Static members
 fs::path HttpSession::root_path_ = fs::current_path();
 
-HttpSession::HttpSession(tcp::socket socket)
-    : socket_(std::move(socket)) {}
+HttpSession::HttpSession(tcp::socket socket): socket_(std::move(socket)) {
+    socket_.set_option(tcp::no_delay(true));
+}
 
 void HttpSession::set_root_path(const fs::path& path){
     root_path_ = fs::canonical(path);
@@ -55,67 +56,35 @@ awaitable<void> HttpSession::handle_session(){
         u8string path;
         string version;
         vector<pair<string, string>> headers;
+        string extra_body;
 
-        co_await read_request(method, path, version, headers);
+        co_await read_request(method, path, version, headers, extra_body);
 
         cout << "[HTTP] " << method << " "
              << string(reinterpret_cast<const char*>(path.data()), path.size())
              << " " << version << endl;
 
         bool is_head = (method == "HEAD");
-        if(method != "GET" && method != "HEAD"){
+        if(method != "GET" && method != "HEAD" && method != "POST" && method != "PUT"){
             vector<pair<string, string>> h;
-            h.emplace_back("Allow", "GET, HEAD");
+            h.emplace_back("Allow", "GET, HEAD, POST, PUT");
             h.emplace_back("Connection", "close");
             co_await send_response(405, "Method Not Allowed", h,
                 "<html><body><h1>405 Method Not Allowed</h1></body></html>");
             co_return;
         }
 
-        fs::path abs_path = get_absolute_path(fs::path(path));
-
-        if(!is_valid_path(abs_path)){
-            vector<pair<string, string>> h;
-            h.emplace_back("Connection", "close");
-            co_await send_response(403, "Forbidden", h,
-                "<html><body><h1>403 Forbidden</h1></body></html>");
+        if(method == "POST"){
+            co_await handle_post_request(path, headers, extra_body);
             co_return;
         }
-
-        if(!fs::exists(abs_path)){
-            vector<pair<string, string>> h;
-            h.emplace_back("Connection", "close");
-            co_await send_response(404, "Not Found", h,
-                "<html><body><h1>404 Not Found</h1></body></html>");
+        else if(method == "PUT"){
+            co_await handle_put_request(path, headers, extra_body);
             co_return;
         }
-
-        if(fs::is_directory(abs_path)){
-            // Redirect if trailing slash is missing (so relative links work)
-            if(path.empty() || path.back() != u8'/'){
-                auto encoded = url_encode(path + u8"/");
-                string location(encoded.begin(), encoded.end());
-                vector<pair<string, string>> h;
-                h.emplace_back("Location", location);
-                h.emplace_back("Connection", "close");
-                co_await send_response(301, "Moved Permanently", h);
-                co_return;
-            }
-            if(is_head){
-                vector<pair<string, string>> h;
-                h.emplace_back("Content-Type", "text/html; charset=utf-8");
-                h.emplace_back("Connection", "close");
-                co_await send_response(200, "OK", h);
-            } else {
-                co_await send_directory_listing(abs_path, path);
-            }
-        } else if(fs::is_regular_file(abs_path)){
-            co_await send_file_response(abs_path, headers, is_head);
-        } else {
-            vector<pair<string, string>> h;
-            h.emplace_back("Connection", "close");
-            co_await send_response(403, "Forbidden", h,
-                "<html><body><h1>403 Forbidden</h1></body></html>");
+        else if(method == "GET" || method == "HEAD"){
+            co_await handle_get_request(path, headers, is_head);
+            co_return;
         }
     } 
     catch(const exception& e){
@@ -129,7 +98,8 @@ awaitable<void> HttpSession::handle_session(){
 //  HTTP request parsing
 // ============================================================
 awaitable<void> HttpSession::read_request(string& method, u8string& path, string& version,
-                                           vector<pair<string, string>>& headers){
+                                           vector<pair<string, string>>& headers,
+                                           string& extra_body){
     string request_string;
 
     auto [ec, bytes_transferred] = co_await asio::async_read_until(
@@ -139,6 +109,13 @@ awaitable<void> HttpSession::read_request(string& method, u8string& path, string
 
     // Parse only up to the delimiter
     string request = request_string.substr(0, bytes_transferred);
+
+    // Save any extra data read beyond the headers (beginning of body)
+    if(request_string.size() > bytes_transferred)
+        extra_body = request_string.substr(bytes_transferred);
+    else
+        extra_body.clear();
+
     istringstream stream(request);
 
     string path_raw;
@@ -206,6 +183,56 @@ awaitable<void> HttpSession::send_response(int status_code, const string& status
     auto [wec, wn] = co_await asio::async_write(socket_, asio::buffer(response_str), as_tuple);
     if(wec)
         throw runtime_error("Failed to send response: " + wec.message());
+}
+
+awaitable<void> HttpSession::handle_get_request(const u8string& path, const vector<pair<string, string>>& request_headers, bool is_head){
+    fs::path abs_path = get_absolute_path(fs::path(path));
+    if(!is_valid_path(abs_path)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Connection", "close");
+        co_await send_response(403, "Forbidden", h,
+            "<html><body><h1>403 Forbidden</h1></body></html>");
+        co_return;
+    }
+
+    if(!fs::exists(abs_path)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Connection", "close");
+        co_await send_response(404, "Not Found", h,
+            "<html><body><h1>404 Not Found</h1></body></html>");
+        co_return;
+    }
+
+    if(fs::is_directory(abs_path)){
+        // Redirect if trailing slash is missing (so relative links work)
+        if(path.empty() || path.back() != u8'/'){
+            auto encoded = url_encode(path + u8"/");
+            string location(encoded.begin(), encoded.end());
+            vector<pair<string, string>> h;
+            h.emplace_back("Location", location);
+            h.emplace_back("Connection", "close");
+            co_await send_response(301, "Moved Permanently", h);
+            co_return;
+        }
+        if(is_head){
+            vector<pair<string, string>> h;
+            h.emplace_back("Content-Type", "text/html; charset=utf-8");
+            h.emplace_back("Connection", "close");
+            co_await send_response(200, "OK", h);
+        } 
+        else {
+            co_await send_directory_listing(abs_path, path);
+        }
+    }
+    else if(fs::is_regular_file(abs_path)){
+        co_await send_file_response(abs_path, request_headers, is_head);
+    }
+    else {
+        vector<pair<string, string>> h;
+        h.emplace_back("Connection", "close");
+        co_await send_response(403, "Forbidden", h,
+            "<html><body><h1>403 Forbidden</h1></body></html>");
+    }
 }
 
 // ============================================================
@@ -589,4 +616,397 @@ string HttpSession::json_escape(const string& text){
         }
     }
     return result;
+}
+
+bool HttpSession::parse_path_from_json(const string& json_str, const string& key, fs::path& path_out){
+    // Simple JSON parsing to extract a string value for the given key
+    // This is a naive implementation and assumes well-formed JSON
+    size_t key_pos = json_str.find('"' + key + '"');
+    if(key_pos == string::npos)
+        return false;
+
+    size_t colon_pos = json_str.find(':', key_pos);
+    if(colon_pos == string::npos)
+        return false;
+
+    size_t quote_start = json_str.find('"', colon_pos);
+    if(quote_start == string::npos)
+        return false;
+
+    size_t quote_end = json_str.find('"', quote_start + 1);
+    if(quote_end == string::npos)
+        return false;
+
+    string value = json_str.substr(quote_start + 1, quote_end - quote_start - 1);
+    u8string u8value(reinterpret_cast<const char8_t*>(value.data()), value.size());
+    path_out = fs::path(u8value);
+    return true;
+}
+
+awaitable<void> HttpSession::handle_post_request(const u8string& path, const vector<pair<string, string>>& request_headers,
+                                                  string& extra_body){
+    size_t content_length = 0;
+    bool has_content_length = false;
+    for(const auto& [key, value] : request_headers){
+        string lower_key = key;
+        transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
+        if(lower_key == "content-length"){
+            try {
+                content_length = stoull(value);
+                has_content_length = true;
+            } catch(...){
+                vector<pair<string, string>> h;
+                h.emplace_back("Content-Type", "application/json; charset=utf-8");
+                h.emplace_back("Connection", "close");
+                co_await send_response(400, "Bad Request", h,
+                    "{\"error\": \"Invalid Content-Length header\"}");
+                co_return;
+            }
+            break;
+        }
+    }
+
+    if(!has_content_length){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(400, "Bad Request", h,
+            "{\"error\": \"Missing Content-Length header\"}");
+        co_return;
+    }
+
+    // Start with any body bytes already read during header parsing
+    string body = std::move(extra_body);
+    size_t read_bytes = body.size();
+
+    while(read_bytes < content_length){
+        size_t to_read = min(static_cast<size_t>(8192), content_length - read_bytes);
+        string chunk(to_read, '\0');
+        auto [ec, bytes_read] = co_await asio::async_read(socket_, asio::buffer(chunk), as_tuple);
+        if(ec){
+            vector<pair<string, string>> h;
+            h.emplace_back("Content-Type", "application/json; charset=utf-8");
+            h.emplace_back("Connection", "close");
+            co_await send_response(500, "Internal Server Error", h,
+                "{\"error\": \"Failed to read request body: " + json_escape(ec.message()) + "\"}");
+            co_return;
+        }
+
+        body.append(chunk.data(), bytes_read);
+        read_bytes += bytes_read;
+    }
+
+    // Trim body to exact content_length in case extra_body had more
+    if(body.size() > content_length)
+        body.resize(content_length);
+
+    if(path == u8"/file/move"){
+        fs::path src, dst;
+        if(!parse_path_from_json(body, "src", src) || !parse_path_from_json(body, "dst", dst)){
+            vector<pair<string, string>> h;
+            h.emplace_back("Content-Type", "application/json; charset=utf-8");
+            h.emplace_back("Connection", "close");
+            co_await send_response(400, "Bad Request", h, "{\"error\": \"Missing or invalid 'source' or 'destination' in JSON body\"}");
+            co_return;
+        }
+        co_await move_file(src, dst);
+        co_return;
+    }
+    else if(path == u8"/file/delete"){
+        fs::path target;
+        if(!parse_path_from_json(body, "file_path", target)){
+            vector<pair<string, string>> h;
+            h.emplace_back("Content-Type", "application/json; charset=utf-8");
+            h.emplace_back("Connection", "close");
+            co_await send_response(400, "Bad Request", h, "{\"error\": \"Missing or invalid 'file_path' in JSON body\"}");
+            co_return;
+        }
+        co_await delete_file(target);
+        co_return;
+    }
+    else if(path == u8"/directory/create"){
+        fs::path dir_path;
+        if(!parse_path_from_json(body, "path", dir_path)){
+            vector<pair<string, string>> h;
+            h.emplace_back("Content-Type", "application/json; charset=utf-8");
+            h.emplace_back("Connection", "close");
+            co_await send_response(400, "Bad Request", h, "{\"error\": \"Missing or invalid 'path' in JSON body\"}");
+            co_return;
+        }
+        co_await create_directory(dir_path);
+        co_return;
+    }
+    else if(path == u8"/file/copy"){
+        fs::path src, dst;
+        if(!parse_path_from_json(body, "src", src) || !parse_path_from_json(body, "dst", dst)){
+            vector<pair<string, string>> h;
+            h.emplace_back("Content-Type", "application/json; charset=utf-8");
+            h.emplace_back("Connection", "close");
+            co_await send_response(400, "Bad Request", h, "{\"error\": \"Missing or invalid 'source' or 'destination' in JSON body\"}");
+            co_return;
+        }
+        co_await copy_file(src, dst);
+        co_return;
+    }
+
+    vector<pair<string, string>> h;
+    h.emplace_back("Content-Type", "application/json; charset=utf-8");
+    h.emplace_back("Connection", "close");
+    co_await send_response(400, "Bad Request", h, "{\"error\": \"Unknown POST request path\"}");
+}
+awaitable<void> HttpSession::move_file(const fs::path& source_path, const fs::path& dest_path){
+    fs::path abs_source = get_absolute_path(source_path);
+    fs::path abs_dest   = get_absolute_path(dest_path);
+
+    if(!is_valid_path(abs_source) || !is_valid_path(abs_dest)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(403, "Forbidden", h,
+            "{\"error\": \"Invalid source or destination path\"}");
+        co_return;
+    }
+
+    if(!fs::exists(abs_source)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(404, "Not Found", h,
+            "{\"error\": \"Source file does not exist\"}");
+        co_return;
+    }
+
+    error_code ec;
+    fs::rename(abs_source, abs_dest, ec);
+    if(ec){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(500, "Internal Server Error", h,
+            "{\"error\": \"Failed to move file: " + json_escape(ec.message()) + "\"}");
+        co_return;
+    }
+
+    vector<pair<string, string>> h;
+    h.emplace_back("Content-Type", "application/json; charset=utf-8");
+    h.emplace_back("Connection", "close");
+    co_await send_response(200, "OK", h,
+        "{\"message\": \"File moved successfully\"}");
+}
+awaitable<void> HttpSession::delete_file(const fs::path& file_path){
+    fs::path abs_path = get_absolute_path(file_path);
+    if(!is_valid_path(abs_path)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(403, "Forbidden", h,
+            "{\"error\": \"Invalid file path\"}");
+        co_return;
+    }
+
+    if(!fs::exists(abs_path)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(404, "Not Found", h,
+            "{\"error\": \"File does not exist\"}");
+        co_return;
+    }
+
+    error_code ec;
+    fs::remove_all(abs_path, ec);
+    if(ec){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(500, "Internal Server Error", h,
+            "{\"error\": \"Failed to delete file: " + json_escape(ec.message()) + "\"}");
+        co_return;
+    }
+
+    vector<pair<string, string>> h;
+    h.emplace_back("Content-Type", "application/json; charset=utf-8");
+    h.emplace_back("Connection", "close");
+    co_await send_response(200, "OK", h,
+        "{\"message\": \"File deleted successfully\"}");
+}
+awaitable<void> HttpSession::create_directory(const fs::path& dir_path){
+    fs::path abs_path = get_absolute_path(dir_path);
+    if(!is_valid_path(abs_path)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(403, "Forbidden", h,
+            "{\"error\": \"Invalid directory path\"}");
+        co_return;
+    }
+
+    error_code ec;
+    fs::create_directory(abs_path, ec);
+    if(ec){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(500, "Internal Server Error", h,
+            "{\"error\": \"Failed to create directory: " + json_escape(ec.message()) + "\"}");
+        co_return;
+    }
+
+    vector<pair<string, string>> h;
+    h.emplace_back("Content-Type", "application/json; charset=utf-8");
+    h.emplace_back("Connection", "close");
+    co_await send_response(200, "OK", h,
+        "{\"message\": \"Directory created successfully\"}");
+}
+awaitable<void> HttpSession::copy_file(const fs::path& source_path, const fs::path& dest_path){
+    fs::path abs_source = get_absolute_path(source_path);
+    fs::path abs_dest   = get_absolute_path(dest_path);
+    if(!is_valid_path(abs_source) || !is_valid_path(abs_dest)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(403, "Forbidden", h,
+            "{\"error\": \"Invalid source or destination path\"}");
+        co_return;
+    }
+
+    if(!fs::exists(abs_source)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(404, "Not Found", h,
+            "{\"error\": \"Source file does not exist\"}");
+        co_return;
+    }
+    if(fs::exists(abs_dest)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(409, "Conflict", h,
+            "{\"error\": \"Destination file already exists\"}");
+        co_return;
+    }
+
+    error_code ec;
+    fs::copy(abs_source, abs_dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if(ec){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(500, "Internal Server Error", h,
+            "{\"error\": \"Failed to copy file: " + json_escape(ec.message()) + "\"}");
+        co_return;
+    }
+
+    vector<pair<string, string>> h;
+    h.emplace_back("Content-Type", "application/json; charset=utf-8");
+    h.emplace_back("Connection", "close");
+    co_await send_response(200, "OK", h,
+        "{\"message\": \"File copied successfully\"}");
+}
+
+awaitable<void> HttpSession::handle_put_request(const u8string& path, const vector<pair<string, string>>& request_headers,
+                                                 string& extra_body){
+    fs::path abs_path = get_absolute_path(fs::path(path));
+    if(!is_valid_path(abs_path)){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(403, "Forbidden", h,
+            "{\"error\": \"Invalid file path\"}");
+        co_return;
+    }
+
+    size_t content_length = 0;
+    bool has_content_length = false;
+    for(const auto& [key, value] : request_headers){
+        string lower_key = key;
+        transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
+        if(lower_key == "content-length"){
+            try {
+                content_length = stoull(value);
+                has_content_length = true;
+            } catch(...){
+                vector<pair<string, string>> h;
+                h.emplace_back("Content-Type", "application/json; charset=utf-8");
+                h.emplace_back("Connection", "close");
+                co_await send_response(400, "Bad Request", h,
+                    "{\"error\": \"Invalid Content-Length header\"}");
+                co_return;
+            }
+            break;
+        }
+    }
+
+    if(!has_content_length){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(400, "Bad Request", h,
+            "{\"error\": \"Missing Content-Length header\"}");
+        co_return;
+    }
+
+    // Create parent directories if needed
+    error_code dir_ec;
+    fs::create_directories(abs_path.parent_path(), dir_ec);
+
+    fstream file(abs_path, ios::binary | ios::out | ios::trunc);
+    if(!file){
+        vector<pair<string, string>> h;
+        h.emplace_back("Content-Type", "application/json; charset=utf-8");
+        h.emplace_back("Connection", "close");
+        co_await send_response(500, "Internal Server Error", h,
+            "{\"error\": \"Failed to open file for writing\"}");
+        co_return;
+    }
+
+    // Write any body bytes already read during header parsing
+    size_t bytes_received = 0;
+    if(!extra_body.empty()){
+        size_t to_write = min(extra_body.size(), content_length);
+        file.write(extra_body.data(), static_cast<streamsize>(to_write));
+        if(!file){
+            vector<pair<string, string>> h;
+            h.emplace_back("Content-Type", "application/json; charset=utf-8");
+            h.emplace_back("Connection", "close");
+            co_await send_response(500, "Internal Server Error", h,
+                "{\"error\": \"Failed to write to file\"}");
+            co_return;
+        }
+        bytes_received = to_write;
+    }
+
+    while(bytes_received < content_length){
+        size_t to_read = min(static_cast<size_t>(65536), content_length - bytes_received);
+        vector<char> buffer(to_read);
+
+        auto [ec, bytes_read] = co_await asio::async_read(socket_, asio::buffer(buffer), as_tuple);
+        if(ec){
+            vector<pair<string, string>> h;
+            h.emplace_back("Content-Type", "application/json; charset=utf-8");
+            h.emplace_back("Connection", "close");
+            co_await send_response(500, "Internal Server Error", h,
+                "{\"error\": \"Failed to read request body: " + json_escape(ec.message()) + "\"}");
+            co_return;
+        }
+
+        file.write(buffer.data(), bytes_read);
+        if(!file){
+            vector<pair<string, string>> h;
+            h.emplace_back("Content-Type", "application/json; charset=utf-8");
+            h.emplace_back("Connection", "close");
+            co_await send_response(500, "Internal Server Error", h,
+                "{\"error\": \"Failed to write to file\"}");
+            co_return;
+        }
+
+        bytes_received += static_cast<size_t>(bytes_read);
+    }
+
+    vector<pair<string, string>> h;
+    h.emplace_back("Content-Type", "application/json; charset=utf-8");
+    h.emplace_back("Connection", "close");
+    co_await send_response(200, "OK", h,
+        "{\"message\": \"File uploaded successfully\"}");
 }
