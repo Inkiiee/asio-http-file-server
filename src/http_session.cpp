@@ -75,7 +75,7 @@ awaitable<void> HttpSession::process_request(const http_base::HttpRequest& reque
         size_t content_length = 0;
 
         co_await read_body(request, request_body, content_length);
-        cout << "[HTTP] Received POST request with body length: " << content_length << endl;
+
         cout << "[HTTP] Request body: " << request_body << endl;
         auto path = request.path();
         if(path == u8"/file/copy"){
@@ -98,7 +98,10 @@ awaitable<void> HttpSession::process_request(const http_base::HttpRequest& reque
             http_base::HttpResponse response;
             response.set_status_code(404);
             response.add_header("Content-Length", "0");
+            response.add_header("Connection", "close");
             co_await write_no_body_response(response);
+
+            throw std::runtime_error("Unknown POST path: " + string(path.begin(), path.end()));
         }
     }
     else if(method == "PUT"){
@@ -376,9 +379,6 @@ awaitable<void> HttpSession::read_request(http_base::HttpRequest& request){
     string version = request.version();
 
     cout << "[HTTP] Received request: " << method << " " << path_str << " " << version << endl;
-    for(const auto& header : request.headers()){
-        cout << "[HTTP] Header: " << header.first << ": " << header.second << endl;
-    }
     co_return;
 }
 
