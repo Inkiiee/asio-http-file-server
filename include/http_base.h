@@ -5,8 +5,25 @@
 #include <string>
 #include <cstdint>
 #include <unordered_map>
+#include <algorithm>
 
 namespace http_base{
+    struct CaseInsensitiveHash {
+        std::size_t operator()(std::string key) const {
+            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+            return std::hash<std::string>{}(key);
+        }
+    };
+    struct CaseInsensitiveEqual {
+        bool operator()(const std::string& a, const std::string& b) const {
+            return a.size() == b.size() &&
+                std::equal(a.begin(), a.end(), b.begin(),
+                    [](char ca, char cb){ return std::tolower(ca) == std::tolower(cb); });
+        }
+    };
+
+    using header_map = std::unordered_map<std::string, std::string, CaseInsensitiveHash, CaseInsensitiveEqual>;
+
     std::vector<uint8_t> url_encode(const std::u8string& decoded);
     std::u8string url_decode(const std::vector<uint8_t>& encoded);
     std::string html_escape(const std::string& text);
@@ -19,7 +36,7 @@ namespace http_base{
         std::string method_;
         std::u8string path_;
         std::string version_ = "HTTP/1.1";
-        std::unordered_map<std::string, std::string> headers_;
+        header_map headers_;
     public:
         HttpRequest() = default;
         HttpRequest(const std::string& method, const std::u8string& path, const std::string& version = "HTTP/1.1");
@@ -27,7 +44,7 @@ namespace http_base{
         const std::string& method() const;
         const std::u8string& path() const;
         const std::string& version() const;
-        const std::unordered_map<std::string, std::string>& headers() const;
+        const header_map& headers() const;
         std::string get_header(const std::string& key) const;
 
         void set_method(const std::string& method);
@@ -45,7 +62,7 @@ namespace http_base{
         std::string version_ = "HTTP/1.1";
         int status_code_;
         std::string status_text_;
-        std::unordered_map<std::string, std::string> headers_;
+        header_map headers_;
 
         std::string get_status_text_(int status_code) const;
     public:
@@ -55,7 +72,7 @@ namespace http_base{
         const std::string& version() const;
         int status_code() const;
         const std::string& status_text() const;
-        const std::unordered_map<std::string, std::string>& headers() const;
+        const header_map& headers() const;
         std::string get_header(const std::string& key) const;
 
         void set_version(const std::string& version);

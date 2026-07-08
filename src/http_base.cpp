@@ -12,7 +12,7 @@ const std::string& HttpRequest::version() const { return version_; }
 void HttpRequest::set_method(const std::string& method) { method_ = method; }
 void HttpRequest::set_path(const std::u8string& path) { path_ = path; }
 void HttpRequest::set_version(const std::string& version) { version_ = version; }
-const std::unordered_map<std::string, std::string>& HttpRequest::headers() const { return headers_; }
+const header_map& HttpRequest::headers() const { return headers_; }
 bool HttpRequest::has_header(const std::string& key) const { return headers_.find(key) != headers_.end(); }
 std::string HttpRequest::get_header(const std::string& key) const {
     auto it = headers_.find(key);
@@ -30,7 +30,7 @@ HttpResponse::HttpResponse(const std::string& version, int status_code): version
 const std::string& HttpResponse::version() const { return version_; }
 int HttpResponse::status_code() const { return status_code_; }
 const std::string& HttpResponse::status_text() const { return status_text_; }
-const std::unordered_map<std::string, std::string>& HttpResponse::headers() const { return headers_; }
+const header_map& HttpResponse::headers() const { return headers_; }
 std::string HttpResponse::get_header(const std::string& key) const {
     auto it = headers_.find(key);
     return it != headers_.end() ? it->second : "";

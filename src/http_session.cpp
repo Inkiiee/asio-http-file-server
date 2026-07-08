@@ -75,6 +75,8 @@ awaitable<void> HttpSession::process_request(const http_base::HttpRequest& reque
         size_t content_length = 0;
 
         co_await read_body(request, request_body, content_length);
+        cout << "[HTTP] Received POST request with body length: " << content_length << endl;
+        cout << "[HTTP] Request body: " << request_body << endl;
         auto path = request.path();
         if(path == u8"/file/copy"){
             auto [response, body] = proto_.copy_file({request, request_body});
