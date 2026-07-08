@@ -20,19 +20,25 @@ find_package(Threads REQUIRED)
 
 set(SRCS
     src/main.cpp
+    src/http_base.cpp
     src/http_file_server.cpp
+    src/http_file_system.cpp
     src/http_session.cpp
-    src/udp_broadcast_server.cpp
+    src/http_util.cpp
+    src/my_proto.cpp
+    src/web_dav_proto.cpp
+    third_party/pugixml/pugixml.cpp
 )
 
 add_executable(http_file_server ${SRCS})
 
-target_compile_options(http_file_server PRIVATE -Wall -O2 -g -Wno-unused-result)
+target_compile_options(http_file_server PRIVATE -O2 -g -w)
 
 # 인클루드 경로
 target_include_directories(http_file_server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/asio_1.38.0/include
 )
 

@@ -4,61 +4,46 @@
 #include <asio.hpp>
 #include <memory>
 #include <string>
-#include <vector>
-#include <filesystem>
+
+#include "http_base.h"
+#include "web_dav_proto.h"
+#include "my_proto.h"
 
 namespace http_file_server{
     class HttpSession: public std::enable_shared_from_this<HttpSession>{
     private:
         asio::ip::tcp::socket socket_;
-        static std::filesystem::path root_path_;
+        std::string buf_;
+        my_proto::MyProto proto_;
+        web_dav_proto::WebDavProto web_dav_proto_;
 
         asio::awaitable<void> handle_session();
+        asio::awaitable<void> process_request(const http_base::HttpRequest& request);
+        asio::awaitable<void> process_get_request(const http_base::HttpRequest& request);
+        asio::awaitable<void> process_put_request(const http_base::HttpRequest& request);
 
-        asio::awaitable<void> read_request(std::string& method, std::u8string& path, std::string& version,
-                                            std::vector<std::pair<std::string, std::string>>& headers,
-                                            std::string& extra_body);
-        asio::awaitable<void> send_response(int status_code, const std::string& status_text,
-                                             const std::vector<std::pair<std::string, std::string>>& headers,
-                                             const std::string& body = "");
+        asio::awaitable<void> read_request(http_base::HttpRequest& request);
+        asio::awaitable<void> read_until(std::string& buffer, const std::string& delimiter);
+        template<typename T>
+        asio::awaitable<void> read_body(const http_base::HttpRequest& request, T& body, std::size_t& content_length);
+        template<typename T>
+        asio::awaitable<void> read_chunked_body(T& body, std::size_t& content_length);
+        template<typename T>
+        asio::awaitable<void> read_fixed_body(T& body, std::size_t content_length);
 
-        asio::awaitable<void> handle_get_request(const std::u8string& path, const std::vector<std::pair<std::string, std::string>>& request_headers,
-                                                 bool head_only = false);
-        asio::awaitable<void> send_file_response(const std::filesystem::path& file_path,
-                                                  const std::vector<std::pair<std::string, std::string>>& request_headers,
-                                                  bool head_only);
-        asio::awaitable<void> send_directory_listing(const std::filesystem::path& dir_path,
-                                                      const std::u8string& request_path);
-
-        asio::awaitable<void> handle_post_request(const std::u8string& path, const std::vector<std::pair<std::string, std::string>>& request_headers,
-                                                    std::string& extra_body);
-        asio::awaitable<void> move_file(const std::filesystem::path& source_path, const std::filesystem::path& dest_path);
-        asio::awaitable<void> delete_file(const std::filesystem::path& file_path);
-        asio::awaitable<void> create_directory(const std::filesystem::path& dir_path);
-        asio::awaitable<void> copy_file(const std::filesystem::path& source_path, const std::filesystem::path& dest_path);
-
-        asio::awaitable<void> handle_put_request(const std::u8string& path, const std::vector<std::pair<std::string, std::string>>& request_headers,
-                                                   std::string& extra_body);
-
-        std::u8string url_decode(const std::vector<uint8_t>& encoded);
-        std::vector<uint8_t> url_encode(const std::u8string& decoded);
-
-        bool is_valid_path(const std::filesystem::path& path);
-        std::filesystem::path get_absolute_path(const std::filesystem::path& path);
-
-        static std::string get_mime_type(const std::filesystem::path& path);
-        static bool parse_range(const std::string& range_header, std::uintmax_t file_size,
-                               std::uintmax_t& start, std::uintmax_t& end);
-        static std::string html_escape(const std::string& text);
-        static std::string json_escape(const std::string& text);
-        static bool parse_path_from_json(const std::string& json_str, const std::string& key, std::filesystem::path& path_out);
+        asio::awaitable<void> write_no_body_response(const http_base::HttpResponse& response);
+        template<typename T>
+        asio::awaitable<void> write_response(const http_base::HttpResponse& response, T& body);
+        template<typename T>
+        asio::awaitable<void> write_chunked_body(T& body);
+        template<typename T>
+        asio::awaitable<void> write_fixed_body(T& body, std::size_t content_length);
     public:
         HttpSession(asio::ip::tcp::socket socket);
 
         void start();
         void stop();
-
-        static void set_root_path(const std::filesystem::path& path);
+        void set_root_path(const std::filesystem::path& path);
     };
 }
 

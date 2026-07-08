@@ -5,15 +5,13 @@ Written by: Inki Lee
 #ifndef __HTTP_FILE_SERVER_H__
 #define __HTTP_FILE_SERVER_H__
 
-#include <asio.hpp>
+#include <memory>
 
 namespace http_file_server{
     class HttpFileServer{
     private:
-        asio::io_context io_context_;
-        asio::ip::tcp::endpoint listen_endpoint_;
-
-        asio::awaitable<void> start_accept(asio::ip::tcp::acceptor& acceptor);
+        class Impl;
+        std::unique_ptr<Impl> impl_;
     public:
         HttpFileServer(const std::string& address, const std::string& port);
         HttpFileServer(const std::string& address, uint16_t port);

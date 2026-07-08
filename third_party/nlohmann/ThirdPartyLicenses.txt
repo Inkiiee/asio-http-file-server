@@ -1,0 +1,41 @@
+Third-Party Software Notices
+
+This product includes third-party open source software.
+
+============================================================
+nlohmann/json
+=============
+
+Project:
+nlohmann/json - JSON for Modern C++
+
+Website:
+https://github.com/nlohmann/json
+
+License:
+MIT License
+
+Copyright:
+Copyright (c) 2013-2026 Niels Lohmann
+
+Notice:
+This product includes nlohmann/json, which is distributed under the MIT License.
+
+The full license text for nlohmann/json is provided in:
+
+```
+licenses/nlohmann_json/LICENSE.MIT
+```
+
+Additional third-party components noted by nlohmann/json include:
+
+* UTF-8 Decoder by Bjoern Hoehrmann
+  License: MIT License
+
+* Grisu2 algorithm by Florian Loitsch
+  License: MIT License
+
+* Hedley by Evan Nemerson
+  License: CC0-1.0
+
+Please refer to the official nlohmann/json license documentation and bundled license files for the complete license terms and notices.
