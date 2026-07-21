@@ -19,11 +19,15 @@ void MyProto::set_data(const string& key, const string& value){
     j[key] = value;
     data_ = j.dump();
 }
-string MyProto::get_data(const string& key) const{
-    if(data_.empty()) return "";
+u8string MyProto::get_data(const string& key) const{
+    if(data_.empty()) return u8"";
     nlohmann::json j = nlohmann::json::parse(data_, nullptr, false);
-    if(j.is_discarded()) return "";
-    return j.value(key, "");
+    if(j.is_discarded()) return u8"";
+    if (j[key].is_string()) {
+        std::string value = j.value(key, "");
+        return u8string(value.begin(), value.end());
+    }
+    return u8"";
 }
 string MyProto::serialize() const{
     return data_;

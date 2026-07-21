@@ -12,11 +12,9 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(THREADS_PREFER_PTHREAD_FLAG ON)
+set(CMAKE_BUILD_TYPE Release)
 
 project(http_file_server C CXX)
-
-find_package(Threads REQUIRED)
 
 set(SRCS
     src/main.cpp
@@ -32,7 +30,11 @@ set(SRCS
 
 add_executable(http_file_server ${SRCS})
 
-target_compile_options(http_file_server PRIVATE -O2 -g -w)
+target_compile_options(http_file_server PRIVATE
+    -w
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:Debug>:-g>
+)
 
 # 인클루드 경로
 target_include_directories(http_file_server PRIVATE
@@ -54,11 +56,6 @@ if(SDKTARGETSYSROOT)
         ${SDKTARGETSYSROOT}/usr/lib
     )
 endif()
-
-# 링크 라이브러리
-target_link_libraries(http_file_server PRIVATE
-    Threads::Threads
-)
 
 # 디버그 빌드 시 DEBUG 매크로 추가
 target_compile_definitions(http_file_server PRIVATE

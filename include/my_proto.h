@@ -12,7 +12,7 @@ namespace my_proto{
         std::string data_;
 
         void set_data(const std::string& key, const std::string& value);
-        std::string get_data(const std::string& key) const;
+        std::u8string get_data(const std::string& key) const;
         std::string serialize() const;
     public:
         MyProto(): BaseProto(), data_("") {};
