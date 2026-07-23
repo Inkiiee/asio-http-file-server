@@ -18,7 +18,7 @@ using asio::as_tuple;
 namespace fs = std::filesystem;
 
 HttpSession::HttpSession(tcp::socket socket): socket_(move(socket)) {
-    socket_.set_option(tcp::no_delay(true));
+    // socket_.set_option(tcp::no_delay(true));
 }
 
 void HttpSession::set_root_path(const fs::path& path){
@@ -436,7 +436,7 @@ template<typename T>
 awaitable<void> HttpSession::read_fixed_body(T& body, size_t content_length){
     size_t bytes_to_read = content_length;
     size_t bytes_read = 0;
-    size_t default_chunk_size = 8192;
+    constexpr size_t default_chunk_size = 1024 * 64; // 64KB
 
     // 버퍼에 이미 남아있는 데이터 먼저 처리
     if(!buf_.empty()){
@@ -501,7 +501,7 @@ asio::awaitable<void> HttpSession::write_response(const http_base::HttpResponse&
 }
 template<typename T>
 asio::awaitable<void> HttpSession::write_chunked_body(T& body){
-    size_t chunk_size = 8192;
+    constexpr size_t chunk_size = 1024 * 64; // 64KB
     size_t total_size = 0;
     size_t offset = 0;
 
@@ -564,7 +564,7 @@ asio::awaitable<void> HttpSession::write_chunked_body(T& body){
 }
 template<typename T>
 asio::awaitable<void> HttpSession::write_fixed_body(T& body, std::size_t content_length){
-    size_t chunk_size = 8192;
+    constexpr size_t chunk_size = 1024 * 64; // 64KB
     size_t total_size = 0;
     size_t offset = 0;
 
