@@ -33,7 +33,7 @@ add_executable(http_file_server ${SRCS})
 target_compile_options(http_file_server PRIVATE
     -w
     $<$<CONFIG:Release>:-O2>
-    $<$<CONFIG:Debug>:-g>
+
 )
 
 # 인클루드 경로
