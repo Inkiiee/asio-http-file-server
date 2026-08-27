@@ -1,10 +1,17 @@
 #include "http_session.h"
 #include "http_util.h"
 
+#include <algorithm>
+#include <cctype>
 #include <concepts>
-#include <iostream>
-#include <fstream>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <sstream>
+#include <string_view>
+#include <type_traits>
+#include <vector>
 
 using namespace std;
 using namespace http_file_server;
@@ -16,6 +23,67 @@ using asio::co_spawn;
 using asio::detached;
 using asio::as_tuple;
 namespace fs = std::filesystem;
+
+namespace {
+    constexpr size_t kIoChunkSize = 1024 * 64;
+
+    bool iequals(string_view lhs, string_view rhs){
+        if(lhs.size() != rhs.size())
+            return false;
+
+        return equal(lhs.begin(), lhs.end(), rhs.begin(),
+            [](unsigned char a, unsigned char b){
+                return tolower(a) == tolower(b);
+            });
+    }
+
+    string trim_copy(string_view value){
+        auto first = value.find_first_not_of(" \t");
+        if(first == string_view::npos)
+            return "";
+
+        auto last = value.find_last_not_of(" \t");
+        return string(value.substr(first, last - first + 1));
+    }
+
+    bool header_has_token(const string& value, string_view token){
+        size_t start = 0;
+        while(start <= value.size()){
+            auto comma = value.find(',', start);
+            auto end = comma == string::npos ? value.size() : comma;
+            auto current = trim_copy(string_view(value).substr(start, end - start));
+            if(iequals(current, token))
+                return true;
+            if(comma == string::npos)
+                break;
+            start = comma + 1;
+        }
+        return false;
+    }
+
+    bool response_must_not_have_body(int status_code){
+        return (status_code >= 100 && status_code < 200) ||
+            status_code == 204 ||
+            status_code == 304;
+    }
+
+    size_t parse_chunk_size_line(const string& line){
+        auto extension = line.find(';');
+        auto size_part = trim_copy(string_view(line).substr(0, extension));
+        if(size_part.empty())
+            throw runtime_error("Invalid chunk size");
+
+        size_t parsed = 0;
+        auto value = stoull(size_part, &parsed, 16);
+        if(parsed != size_part.size())
+            throw runtime_error("Invalid chunk size");
+
+        if(value > numeric_limits<size_t>::max())
+            throw runtime_error("Chunk size is too large");
+
+        return static_cast<size_t>(value);
+    }
+}
 
 HttpSession::HttpSession(tcp::socket socket): socket_(move(socket)) {
     // socket_.set_option(tcp::no_delay(true));
@@ -48,7 +116,7 @@ awaitable<void> HttpSession::handle_session(){
             bool is_need_close = false;
             http_base::HttpRequest request;
             co_await read_request(request);
-            if(request.has_header("Connection") && request.get_header("Connection") == "close"){
+            if(request.has_header("Connection") && header_has_token(request.get_header("Connection"), "close")){
                 is_need_close = true;
             }
 
@@ -184,7 +252,10 @@ awaitable<void> HttpSession::process_get_request(const http_base::HttpRequest& r
     
     if(proto_.is_directory(request.path())){
         auto [response, body] = proto_.make_file_list_info({request, ""});
-        co_await write_response(response, body);
+        if(request.method() == "HEAD")
+            co_await write_no_body_response(response);
+        else
+            co_await write_response(response, body);
     }
     else{
         auto path = proto_.download_file_path({request, ""});
@@ -236,6 +307,11 @@ awaitable<void> HttpSession::process_get_request(const http_base::HttpRequest& r
             }
         }
         else{
+            if(request.method() == "HEAD"){
+                co_await write_no_body_response(response);
+                co_return;
+            }
+
             co_await write_response(response, file);
         }
     }
@@ -243,7 +319,7 @@ awaitable<void> HttpSession::process_get_request(const http_base::HttpRequest& r
 
 awaitable<void> HttpSession::process_put_request(const http_base::HttpRequest& request){
     bool is_existing_file = proto_.is_exists(request.path());
-    bool is_expect_continue = request.has_header("Expect") && request.get_header("Expect") == "100-continue";
+    bool is_expect_continue = request.has_header("Expect") && iequals(request.get_header("Expect"), "100-continue");
     auto path = web_dav_proto_.upload_file_path({request, ""});
     if(!web_dav_proto_.is_valid_path(path)){
         cout << "[HTTP] PUT request failed: path is invalid" << endl;
@@ -383,18 +459,28 @@ awaitable<void> HttpSession::read_request(http_base::HttpRequest& request){
 }
 
 awaitable<void> HttpSession::read_until(string& buffer, const string& delimiter){
-    auto [ec, bytes_transferred] = co_await asio::async_read_until(socket_, asio::dynamic_buffer(buffer), delimiter, as_tuple);
-    if(ec){
-        throw std::runtime_error("Error reading: " + ec.message());
-    }
+    if(delimiter.empty())
+        throw runtime_error("Delimiter must not be empty");
 
-    buffer.assign(buffer.begin(), buffer.begin() + bytes_transferred);
-    buf_.erase(0, bytes_transferred);
+    for(;;){
+        auto delimiter_pos = buf_.find(delimiter);
+        if(delimiter_pos != string::npos){
+            buffer.assign(buf_.data(), delimiter_pos);
+            buf_.erase(0, delimiter_pos + delimiter.size());
+            co_return;
+        }
+
+        auto [ec, bytes_transferred] = co_await asio::async_read_until(socket_, asio::dynamic_buffer(buf_), delimiter, as_tuple);
+        (void)bytes_transferred;
+        if(ec){
+            throw std::runtime_error("Error reading: " + ec.message());
+        }
+    }
 }
 
 template<typename T>
 awaitable<void> HttpSession::read_body(const HttpRequest& request, T& body, size_t& content_length){
-    if(request.has_header("Transfer-Encoding") && request.get_header("Transfer-Encoding") == "chunked"){
+    if(request.has_header("Transfer-Encoding") && header_has_token(request.get_header("Transfer-Encoding"), "chunked")){
         co_await read_chunked_body(body, content_length);
     }
     else if(request.has_header("Content-Length")){
@@ -409,34 +495,50 @@ awaitable<void> HttpSession::read_body(const HttpRequest& request, T& body, size
 
 template<typename T>
 awaitable<void> HttpSession::read_chunked_body(T& body, size_t& content_length){
-    std::string chunked_size_str;
-    co_await read_until(chunked_size_str, "\r\n");
+    content_length = 0;
 
-    size_t chunk_size = std::stoul(chunked_size_str, nullptr, 16);
-    if(chunk_size == 0){
-        string trailing_crlf;
-        co_await read_until(trailing_crlf, "\r\n");
-        co_return;
+    for(;;){
+        string chunked_size_str;
+        co_await read_until(chunked_size_str, "\r\n");
+
+        size_t chunk_size = parse_chunk_size_line(chunked_size_str);
+        if(chunk_size == 0){
+            for(;;){
+                string trailer_line;
+                co_await read_until(trailer_line, "\r\n");
+                if(trailer_line.empty())
+                    co_return;
+            }
+        }
+
+        if(chunk_size > numeric_limits<size_t>::max() - content_length)
+            throw runtime_error("Chunked body is too large");
+
+        string chunk_data;
+        co_await read_fixed_body(chunk_data, chunk_size);
+
+        string chunk_crlf;
+        co_await read_until(chunk_crlf, "\r\n");
+        if(!chunk_crlf.empty())
+            throw runtime_error("Malformed chunk data");
+
+        if constexpr (is_same_v<T, string>)
+            body += chunk_data;
+        else if constexpr (is_same_v<T, vector<uint8_t>> || is_same_v<T, vector<char>>)
+            body.insert(body.end(), chunk_data.begin(), chunk_data.end());
+        else if constexpr (is_base_of_v<std::ostream, T>)
+            body.write(chunk_data.data(), chunk_data.size());
+        else
+            throw std::runtime_error("Unsupported body type for read_chunked_body");
+
+        content_length += chunk_size;
     }
-
-    std::string chunk_data;
-    co_await read_until(chunk_data, "\r\n");
-
-    if constexpr (is_same_v<T, string>)
-        body += chunk_data;
-    else if constexpr (is_same_v<T, vector<uint8_t>> || is_same_v<T, vector<char>>) 
-        body.insert(body.end(), chunk_data.begin(), chunk_data.end());
-    else if constexpr (is_base_of_v<std::ostream, T>) 
-        body.write(chunk_data.data(), chunk_data.size());
-    else
-        throw std::runtime_error("Unsupported body type for read_chunked_body");
 }
 
 template<typename T>
 awaitable<void> HttpSession::read_fixed_body(T& body, size_t content_length){
     size_t bytes_to_read = content_length;
     size_t bytes_read = 0;
-    constexpr size_t default_chunk_size = 1024 * 64; // 64KB
 
     // 버퍼에 이미 남아있는 데이터 먼저 처리
     if(!buf_.empty()){
@@ -455,7 +557,7 @@ awaitable<void> HttpSession::read_fixed_body(T& body, size_t content_length){
     }
 
     while(bytes_read < bytes_to_read){
-        size_t chunk_size = std::min(default_chunk_size, bytes_to_read - bytes_read);
+        size_t chunk_size = std::min(kIoChunkSize, bytes_to_read - bytes_read);
         auto [ec, bytes_transferred] = co_await asio::async_read(socket_, asio::dynamic_buffer(buf_), asio::transfer_exactly(chunk_size), as_tuple);
         if(ec){
             throw std::runtime_error("Error reading fixed body: " + ec.message());
@@ -486,34 +588,49 @@ awaitable<void> HttpSession::write_no_body_response(const http_base::HttpRespons
 
 template<typename T>
 asio::awaitable<void> HttpSession::write_response(const http_base::HttpResponse& response, T& body){
-    auto response_str = http_maker::Maker::make_response(response);
+    auto response_to_send = response;
+    const bool skip_body = response_must_not_have_body(response_to_send.status_code());
+    if(skip_body){
+        response_to_send.remove_header("Transfer-Encoding");
+        response_to_send.add_header("Content-Length", "0");
+    }
+
+    auto response_str = http_maker::Maker::make_response(response_to_send);
 
     auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(response_str), asio::as_tuple);
+    (void)bytes_transferred;
     if(ec){
         throw std::runtime_error("Error writing response: " + ec.message());
     }
-    if(response.has_header("Transfer-Encoding") && response.get_header("Transfer-Encoding") == "chunked")
+    if(skip_body)
+        co_return;
+
+    if(response_to_send.has_header("Transfer-Encoding") && header_has_token(response_to_send.get_header("Transfer-Encoding"), "chunked"))
         co_await write_chunked_body(body);
-    else if(response.has_header("Content-Length")){
-        size_t content_length = std::stoul(response.get_header("Content-Length"));
+    else if(response_to_send.has_header("Content-Length")){
+        size_t content_length = std::stoul(response_to_send.get_header("Content-Length"));
         co_await write_fixed_body(body, content_length);
     }
 }
 template<typename T>
 asio::awaitable<void> HttpSession::write_chunked_body(T& body){
-    constexpr size_t chunk_size = 1024 * 64; // 64KB
     size_t total_size = 0;
     size_t offset = 0;
 
     if constexpr (is_same_v<T, string>){
         total_size = body.size();
         while(offset < total_size){
-            size_t current_chunk_size = std::min(chunk_size, total_size - offset);
+            size_t current_chunk_size = std::min(kIoChunkSize, total_size - offset);
             string chunk_data = body.substr(offset, current_chunk_size);
             stringstream chunk_header;
             chunk_header << std::hex << current_chunk_size << "\r\n";
 
-            auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(chunk_header.str() + chunk_data + "\r\n"), asio::as_tuple);
+            string chunk = chunk_header.str();
+            chunk += chunk_data;
+            chunk += "\r\n";
+
+            auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(chunk), asio::as_tuple);
+            (void)bytes_transferred;
             if(ec){
                 throw std::runtime_error("Error writing chunked body: " + ec.message());
             }
@@ -523,12 +640,17 @@ asio::awaitable<void> HttpSession::write_chunked_body(T& body){
     else if constexpr (is_same_v<T, vector<uint8_t>> || is_same_v<T, vector<char>>){
         total_size = body.size();
         while(offset < total_size){
-            size_t current_chunk_size = std::min(chunk_size, total_size - offset);
+            size_t current_chunk_size = std::min(kIoChunkSize, total_size - offset);
             string chunk_data(body.begin() + offset, body.begin() + offset + current_chunk_size);
             stringstream chunk_header;
             chunk_header << std::hex << current_chunk_size << "\r\n";
 
-            auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(chunk_header.str() + chunk_data + "\r\n"), asio::as_tuple);
+            string chunk = chunk_header.str();
+            chunk += chunk_data;
+            chunk += "\r\n";
+
+            auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(chunk), asio::as_tuple);
+            (void)bytes_transferred;
             if(ec){
                 throw std::runtime_error("Error writing chunked body: " + ec.message());
             }
@@ -539,41 +661,56 @@ asio::awaitable<void> HttpSession::write_chunked_body(T& body){
         // chunked는 전체 크기를 미리 알아야 하므로 seek 사용
         auto current_pos = body.tellg();
         body.seekg(0, std::ios::end);
-        total_size = body.tellg();
+        auto end_pos = body.tellg();
         body.seekg(current_pos);
+        if(current_pos == std::streampos(-1) || end_pos == std::streampos(-1) || end_pos < current_pos)
+            throw runtime_error("Unable to determine stream size for chunked response");
+
+        total_size = static_cast<size_t>(end_pos - current_pos);
 
         while(offset < total_size){
-            size_t current_chunk_size = std::min(chunk_size, total_size - offset);
+            size_t current_chunk_size = std::min(kIoChunkSize, total_size - offset);
             std::vector<char> buffer(current_chunk_size);
             body.read(buffer.data(), current_chunk_size);
-            auto bytes_actually_read = body.gcount();
+            auto bytes_actually_read = static_cast<size_t>(body.gcount());
             if(bytes_actually_read <= 0) break;
-            string chunk_data(buffer.data(), bytes_actually_read);
             stringstream chunk_header;
             chunk_header << std::hex << bytes_actually_read << "\r\n";
 
-            auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(chunk_header.str() + chunk_data + "\r\n"), asio::as_tuple);
+            string chunk = chunk_header.str();
+            chunk.append(buffer.data(), bytes_actually_read);
+            chunk += "\r\n";
+
+            auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(chunk), asio::as_tuple);
+            (void)bytes_transferred;
             if(ec){
                 throw std::runtime_error("Error writing chunked body: " + ec.message());
             }
-            offset += current_chunk_size;
+            offset += bytes_actually_read;
         }
     }
     else
         throw std::runtime_error("Unsupported body type for write_chunked_body");
+
+    string final_chunk = "0\r\n\r\n";
+    auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(final_chunk), asio::as_tuple);
+    (void)bytes_transferred;
+    if(ec){
+        throw std::runtime_error("Error writing final chunk: " + ec.message());
+    }
 }
 template<typename T>
 asio::awaitable<void> HttpSession::write_fixed_body(T& body, std::size_t content_length){
-    constexpr size_t chunk_size = 1024 * 64; // 64KB
     size_t total_size = 0;
     size_t offset = 0;
 
     if constexpr (is_same_v<T, string>){
-        total_size = body.size();
+        total_size = std::min(body.size(), content_length);
         while(offset < total_size){
-            size_t current_chunk_size = std::min(chunk_size, total_size - offset);
+            size_t current_chunk_size = std::min(kIoChunkSize, total_size - offset);
             string chunk_data = body.substr(offset, current_chunk_size);
             auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(chunk_data), asio::as_tuple);
+            (void)bytes_transferred;
             if(ec){
                 throw std::runtime_error("Error writing fixed body: " + ec.message());
             }
@@ -581,11 +718,12 @@ asio::awaitable<void> HttpSession::write_fixed_body(T& body, std::size_t content
         }
     }
     else if constexpr (is_same_v<T, vector<uint8_t>> || is_same_v<T, vector<char>>){
-        total_size = body.size();
+        total_size = std::min(body.size(), content_length);
         while(offset < total_size){
-            size_t current_chunk_size = std::min(chunk_size, total_size - offset);
+            size_t current_chunk_size = std::min(kIoChunkSize, total_size - offset);
             string chunk_data(body.begin() + offset, body.begin() + offset + current_chunk_size);
             auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(chunk_data), asio::as_tuple);
+            (void)bytes_transferred;
             if(ec){
                 throw std::runtime_error("Error writing fixed body: " + ec.message());
             }
@@ -596,12 +734,13 @@ asio::awaitable<void> HttpSession::write_fixed_body(T& body, std::size_t content
         total_size = content_length;
 
         while(offset < total_size){
-            size_t current_chunk_size = std::min(chunk_size, total_size - offset);
+            size_t current_chunk_size = std::min(kIoChunkSize, total_size - offset);
             std::vector<char> buffer(current_chunk_size);
             body.read(buffer.data(), current_chunk_size);
             auto bytes_actually_read = body.gcount();
             if(bytes_actually_read <= 0) break;
             auto [ec, bytes_transferred] = co_await asio::async_write(socket_, asio::buffer(buffer.data(), bytes_actually_read), asio::as_tuple);
+            (void)bytes_transferred;
             if(ec){
                 throw std::runtime_error("Error writing fixed body: " + ec.message());
             }
