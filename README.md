@@ -1,4 +1,4 @@
-# SimpleHttpFileServer
+# asio-http-file-server
 
 C++20과 standalone Asio 기반의 간단한 HTTP 파일 서버입니다. 지정한 루트 디렉터리 안의 파일을 다운로드/업로드하고, JSON API 또는 WebDAV 메서드로 파일과 디렉터리를 조작할 수 있습니다.
 
