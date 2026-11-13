@@ -8,11 +8,39 @@
 #include <cstdint>
 #include <ctime>
 #include <optional>
+#include <random>
+#include <unordered_set>
+
 #include "http_file_entry.h"
 
 namespace http_file_system{
+    class RandomNameGeneration{
+    public:
+        RandomNameGeneration(int minimum = 0, int maximum = 9999): gen_(std::random_device{}()), dis_(minimum, maximum) {}
+        std::filesystem::path gen(const std::filesystem::path& path){
+            auto parent = path.parent_path();
+            auto base_name = path.filename().string();
+            auto name = base_name;
+            do{
+                name = base_name + std::to_string(dis_(gen_));
+            }while(used_names_.find(name) != used_names_.end());
+            used_names_.insert(name);
+            return parent / name;
+        }
+        void return_path(const std::filesystem::path& path){
+            auto parent = path.parent_path();
+            auto base_name = path.filename().string();
+            used_names_.erase(base_name);
+        }
+    private:
+        std::mt19937 gen_;
+        std::uniform_int_distribution<int> dis_;
+        std::unordered_set<std::string> used_names_;
+    };
+
     class HttpFileSystem{
     private:
+        RandomNameGeneration temp_name_maker_;
         std::filesystem::path root_path_;
 
         inline bool safe_gmtime(const std::time_t* time, std::tm* result){
@@ -40,6 +68,13 @@ namespace http_file_system{
         bool is_directory(const std::filesystem::path& path);
         bool is_exists(const std::filesystem::path& path);
         bool is_valid_path(const std::filesystem::path& path);
+
+        inline std::filesystem::path borrow_temp_path(const std::filesystem::path& path){
+            return temp_name_maker_.gen(path);
+        }
+        inline void return_temp_path(const std::filesystem::path& path){
+            temp_name_maker_.return_path(path);
+        }
 
         inline std::optional<std::time_t> parse_http_date(const std::string& value) {
             std::tm tm = {};

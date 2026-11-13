@@ -2,10 +2,71 @@
 
 #include <sstream>
 #include <iostream>
+#include <algorithm>
+#include <limits>
 
 using namespace std;
 using namespace http_parser;
 using namespace http_maker;
+
+namespace http_sub_functions{
+    bool iequals(string_view lhs, string_view rhs){
+        if(lhs.size() != rhs.size())
+            return false;
+
+        return equal(lhs.begin(), lhs.end(), rhs.begin(),
+            [](unsigned char a, unsigned char b){
+                return tolower(a) == tolower(b);
+            });
+    }
+
+    string trim_copy(string_view value){
+        auto first = value.find_first_not_of(" \t");
+        if(first == string_view::npos)
+            return "";
+
+        auto last = value.find_last_not_of(" \t");
+        return string(value.substr(first, last - first + 1));
+    }
+
+    bool header_has_token(const string& value, string_view token){
+        size_t start = 0;
+        while(start <= value.size()){
+            auto comma = value.find(',', start);
+            auto end = comma == string::npos ? value.size() : comma;
+            auto current = trim_copy(string_view(value).substr(start, end - start));
+            if(iequals(current, token))
+                return true;
+            if(comma == string::npos)
+                break;
+            start = comma + 1;
+        }
+        return false;
+    }
+
+    bool response_must_not_have_body(int status_code){
+        return (status_code >= 100 && status_code < 200) ||
+            status_code == 204 ||
+            status_code == 304;
+    }
+
+    size_t parse_chunk_size_line(const string& line){
+        auto extension = line.find(';');
+        auto size_part = trim_copy(string_view(line).substr(0, extension));
+        if(size_part.empty())
+            throw runtime_error("Invalid chunk size");
+
+        size_t parsed = 0;
+        auto value = stoull(size_part, &parsed, 16);
+        if(parsed != size_part.size())
+            throw runtime_error("Invalid chunk size");
+
+        if(value > numeric_limits<size_t>::max())
+            throw runtime_error("Chunk size is too large");
+
+        return static_cast<size_t>(value);
+    }
+}
 
 http_base::HttpRequest Parser::parse_request(){
     http_base::HttpRequest request;

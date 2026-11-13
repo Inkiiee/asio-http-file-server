@@ -18,13 +18,15 @@ project(http_file_server C CXX)
 
 set(SRCS
     src/main.cpp
-    src/http_base.cpp
-    src/http_file_server.cpp
-    src/http_file_system.cpp
-    src/http_session.cpp
-    src/http_util.cpp
-    src/my_proto.cpp
-    src/web_dav_proto.cpp
+    src/http/http_base.cpp
+    src/server/http_file_server.cpp
+    src/file_system/http_file_system.cpp
+    src/server/http_session.cpp
+    src/http/http_util.cpp
+    src/protocol/my_proto.cpp
+    src/protocol/web_dav_proto.cpp
+    src/server/http_receiver.cpp
+    src/server/http_sender.cpp
     third_party/pugixml/pugixml.cpp
 )
 
@@ -40,6 +42,10 @@ target_compile_options(http_file_server PRIVATE
 target_include_directories(http_file_server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/http
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/server
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/protocol
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/file_system
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/asio_1.38.0/include
 )

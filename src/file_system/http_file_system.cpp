@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iostream>
 
 namespace fs = std::filesystem;
 using namespace http_file_system;
@@ -36,37 +37,67 @@ fs::path HttpFileSystem::get_absolute_path(const fs::path& path){
 int HttpFileSystem::move_file(const fs::path& source_path, const fs::path& dest_path, bool is_overwrite){
     const auto& abs_source = get_absolute_path(source_path);
     const auto& abs_dest   = get_absolute_path(dest_path);
-
-    if(!is_valid_path(abs_source) || !is_valid_path(abs_dest))
+    if(!is_valid_path(abs_source) || !is_valid_path(abs_dest)){
+        std::cout << "[move_file] invalid path" << std::endl;
         return 403; // Forbidden
-    
-    if(!fs::exists(abs_source))
-        return 404; // Not Found
+    }
 
-    if(fs::exists(abs_dest)){
-        if(!is_overwrite)
-            return 409; // Conflict
-        
-        // 덮어쓰기일 경우, 소스와 대상이 서로 다른 타입이면 대상 삭제
-        bool is_source_dir = fs::is_directory(abs_source);
-        bool is_dest_dir   = fs::is_directory(abs_dest);
-        if(is_source_dir != is_dest_dir && is_overwrite)
-            fs::remove_all(abs_dest);
+    std::error_code existst_ec;
+    bool is_exists_source = fs::exists(abs_source, existst_ec);
+    if(existst_ec){
+        std::cout << "[move_file] exists source: " << abs_source.string() << " failed" << std::endl;
+        return 500;
+    }
+    if(!is_exists_source){
+        std::cout << "[move_file] not exists source: " << std::endl;
+        return 404; // Not Found
+    }
+
+    bool is_exists_dest = fs::exists(abs_dest, existst_ec);
+    if(existst_ec){
+        std::cout << "[move_file] exists destination: " << abs_dest.string() << " failed" << std::endl;
+        return 500;
+    }
+    if(is_exists_dest && !is_overwrite){
+        std::cout << "[move_file] source exists " << abs_source.string() << " but not set overwrite option" << std::endl;
+        return 409; // Conflict
     }
 
     std::error_code ec;
-    fs::rename(abs_source, abs_dest, ec);
-    if(ec)
+    auto temp_path = borrow_temp_path(abs_dest);
+    if(is_exists_dest){
+        fs::rename(abs_dest, temp_path, ec);
+        if(ec){
+            std::cout << "[move_file] destination: " << abs_dest.string() << " move temp_path failed" << std::endl;
+            return_temp_path(temp_path);
+            return 500;
+        }
+    }
+    
+    fs::rename(abs_source, abs_dest);
+    if(ec){
+        std::cout << "[move_file] move failed " << std::endl;
+        if(is_exists_dest)
+            fs::rename(temp_path, abs_dest, std::error_code{});
+
+        return_temp_path(temp_path);
         return 500; // Internal Server Error
+    }
+    if(is_exists_dest)
+        fs::remove_all(temp_path, std::error_code{});
+
+    return_temp_path(temp_path);
     return 200; // OK
 }
 
 // 파일 삭제
 int HttpFileSystem::delete_file(const fs::path& file_path){
     const auto& abs_path = get_absolute_path(file_path);
-    if(!is_valid_path(abs_path))
+    const auto& abs_root = root_path_;
+    std::error_code equiv_ec;
+    if(!is_valid_path(abs_path) || fs::equivalent(abs_path, abs_root, equiv_ec) || equiv_ec)
         return 403; // Forbidden
-    
+
     if(!fs::exists(abs_path))
         return 404; // Not Found
     
@@ -98,7 +129,6 @@ int HttpFileSystem::create_directory(const fs::path& dir_path, bool is_recursive
 int HttpFileSystem::copy_file(const fs::path& source_path, const fs::path& dest_path, bool is_overwrite){
     const auto& abs_source = get_absolute_path(source_path);
     const auto& abs_dest   = get_absolute_path(dest_path);
-
     if(!is_valid_path(abs_source) || !is_valid_path(abs_dest))
         return 403; // Forbidden
     
