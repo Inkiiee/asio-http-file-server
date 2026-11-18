@@ -23,6 +23,7 @@ awaitable<void> HttpSender::send_no_body_response(int status_code){
     HttpResponse response;
     response.set_status_code(status_code);
     response.add_header("Content-Length", "0");
+
     if(status_code >= 400 && status_code < 600){
         response.add_header("Connection", "close");
     }

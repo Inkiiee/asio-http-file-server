@@ -46,6 +46,9 @@ namespace http_file_server{
         const bool skip_body = http_sub_functions::response_must_not_have_body(response_to_send.status_code());
         if(skip_body){
             response_to_send.remove_header("Transfer-Encoding");
+            
+            if(response_to_send.has_header("Content-Length"))
+                response_to_send.remove_header("Content-Length");
             response_to_send.add_header("Content-Length", "0");
         }
 
@@ -59,10 +62,10 @@ namespace http_file_server{
         if(skip_body)
             co_return;
 
-        if(response_to_send.has_header("Transfer-Encoding") && http_sub_functions::header_has_token(response_to_send.get_header("Transfer-Encoding"), "chunked"))
+        if(response_to_send.has_header("Transfer-Encoding") && http_sub_functions::header_has_token(response_to_send.get_header("Transfer-Encoding")[0], "chunked"))
             co_await send_chunked_body(body);
         else if(response_to_send.has_header("Content-Length")){
-            std::size_t content_length = std::stoul(response_to_send.get_header("Content-Length"));
+            std::size_t content_length = std::stoul(response_to_send.get_header("Content-Length")[0]);
             co_await send_fixed_body(body, content_length);
         }
     }

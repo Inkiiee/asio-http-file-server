@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <optional>
 
 namespace http_parser{
     class Parser{
@@ -13,8 +14,8 @@ namespace http_parser{
         std::string buffer_;
     public:
         Parser(std::string buffer = ""): buffer_(std::move(buffer)) {};
-        http_base::HttpRequest parse_request();
-        http_base::HttpResponse parse_response();
+        std::optional<http_base::HttpRequest> parse_request();
+        std::optional<http_base::HttpResponse> parse_response();
     };
 }
 

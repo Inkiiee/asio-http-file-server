@@ -15,7 +15,7 @@ using namespace http_parser;
 using asio::awaitable;
 using asio::as_tuple;
 
-awaitable<void> HttpReceiver::read_request(http_base::HttpRequest& request, bool& is_need_close){
+awaitable<bool> HttpReceiver::read_request(http_base::HttpRequest& request, bool& is_need_close){
     auto [ec, bytes_transferred] = co_await async_read_until(*psocket_, asio::dynamic_buffer(buf_), "\r\n\r\n", as_tuple);
     if(ec) throw std::runtime_error("Connection closed: " + ec.message());
 
@@ -23,18 +23,24 @@ awaitable<void> HttpReceiver::read_request(http_base::HttpRequest& request, bool
     buf_.erase(0, bytes_transferred);
 
     Parser parser(request_data);
-    request = parser.parse_request();
+    auto parse_request = parser.parse_request();
+    if(!parse_request.has_value()){
+        co_return false;
+    }
+
+    request = *parse_request;
     string method = request.method();
     auto path = request.path();
     string path_str(path.begin(), path.end());
     string version = request.version();
 
-    if(request.has_header("Connection") && header_has_token(request.get_header("Connection"), "close"))
+    if(request.has_header("Connection") && header_has_token(request.get_header("Connection")[0], "close")
+        || request.version() == "HTTP/1.0")
         is_need_close = true;
     else
         is_need_close = false;
 
-    co_return;
+    co_return true;
 }
 
 awaitable<void> HttpReceiver::read_until(std::string& buffer, const std::string& delimiter){

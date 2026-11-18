@@ -24,7 +24,7 @@ namespace http_file_server{
     class HttpReceiver{
     public:
         HttpReceiver(asio::ip::tcp::socket* socket, std::size_t io_chunk_size = 8192): psocket_(socket), io_chunk_size_(io_chunk_size){}
-        asio::awaitable<void> read_request(http_base::HttpRequest& request, bool& is_need_close);
+        asio::awaitable<bool> read_request(http_base::HttpRequest& request, bool& is_need_close);
         virtual ~HttpReceiver() = default;
 
         template<typename T>
@@ -43,11 +43,11 @@ namespace http_file_server{
 
     template<typename T>
     asio::awaitable<void> HttpReceiver::read_body(const http_base::HttpRequest& request, T& body, std::size_t& content_length){
-        if(request.has_header("Transfer-Encoding") && http_sub_functions::header_has_token(request.get_header("Transfer-Encoding"), "chunked")){
+        if(request.has_header("Transfer-Encoding") && http_sub_functions::header_has_token(request.get_header("Transfer-Encoding")[0], "chunked")){
             co_await read_chunked_body(body, content_length);
         }
         else if(request.has_header("Content-Length")){
-            content_length = std::stoul(request.get_header("Content-Length"));
+            content_length = std::stoul(request.get_header("Content-Length")[0]);
             co_await read_fixed_body(body, content_length);
         }
         content_length = 0;

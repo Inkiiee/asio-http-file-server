@@ -46,7 +46,11 @@ awaitable<void> HttpSession::handle_session(){
         while(true){
             bool is_need_close = false;
             http_base::HttpRequest request;
-            co_await receiver_.read_request(request, is_need_close);
+            bool is_valid = co_await receiver_.read_request(request, is_need_close);
+            if(!is_valid){
+                co_await sender_.send_no_body_response(400);
+                break;
+            }
 
             co_await process_request(request);
             if(is_need_close){
@@ -176,10 +180,12 @@ awaitable<void> HttpSession::process_get_request(const http_base::HttpRequest& r
 
         if(request.has_header("Range")){
             size_t start, end;
-            if(http_base::parse_range(request.get_header("Range"), file_size, start, end)){
+            if(http_base::parse_range(request.get_header("Range")[0], file_size, start, end)){
                 response.set_status_code(206);
                 response.add_header("Content-Range", "bytes " + std::to_string(start) + "-" + std::to_string(end) + "/" + std::to_string(file_size));
                 size_t content_length = end - start + 1;
+
+                response.remove_header("Content-Length");
                 response.add_header("Content-Length", std::to_string(content_length));
 
                 if(request.method() == "HEAD"){
@@ -192,6 +198,7 @@ awaitable<void> HttpSession::process_get_request(const http_base::HttpRequest& r
             }
             else{
                 response.set_status_code(416);
+                response.remove_header("Content-Length");
                 response.add_header("Content-Length", "0");
                 co_await sender_.send_no_body_response(response);
             }
@@ -209,7 +216,7 @@ awaitable<void> HttpSession::process_get_request(const http_base::HttpRequest& r
 
 awaitable<void> HttpSession::process_put_request(const http_base::HttpRequest& request){
     bool is_existing_file = web_dav_proto_.is_exists(request.path());
-    bool is_expect_continue = request.has_header("Expect") && iequals(request.get_header("Expect"), "100-continue");
+    bool is_expect_continue = request.has_header("Expect") && iequals(request.get_header("Expect")[0], "100-continue");
     auto path = web_dav_proto_.upload_file_path({request, ""});
     if(!web_dav_proto_.is_valid_path(path)){
         cout << "[HTTP] PUT request failed: path is invalid" << endl;
@@ -220,7 +227,7 @@ awaitable<void> HttpSession::process_put_request(const http_base::HttpRequest& r
     }
 
     if(request.has_header("If-None-Match")){
-        string if_none_match = request.get_header("If-None-Match");
+        string if_none_match = request.get_header("If-None-Match")[0];
         if(if_none_match == "*"){
             if(is_existing_file){
                 cout << "[HTTP] PUT request failed: resource already exists and If-None-Match is '*'" << endl;
@@ -232,7 +239,7 @@ awaitable<void> HttpSession::process_put_request(const http_base::HttpRequest& r
     }
 
     if(request.has_header("If-Match")){
-        string if_match = request.get_header("If-Match");
+        string if_match = request.get_header("If-Match")[0];
         auto&& entry = web_dav_proto_.get_file_info(fs::path(request.path()));
         if(if_match != entry.etag){
             cout << "[HTTP] PUT request failed: ETag does not match If-Match header" << endl;
@@ -244,7 +251,7 @@ awaitable<void> HttpSession::process_put_request(const http_base::HttpRequest& r
     }
 
     if(request.has_header("If-Unmodified-Since")){
-        string if_unmodified_since = request.get_header("If-Unmodified-Since");
+        string if_unmodified_since = request.get_header("If-Unmodified-Since")[0];
         auto unmodified_since = web_dav_proto_.parse_http_date(if_unmodified_since);
         if(!unmodified_since){
             cout << "[HTTP] PUT request failed: Invalid If-Unmodified-Since header value" << endl;
@@ -265,30 +272,36 @@ awaitable<void> HttpSession::process_put_request(const http_base::HttpRequest& r
             throw std::runtime_error("PUT failed: precondition failed (If-Unmodified-Since)");
         }
     }
-
-    auto parent_path = path.parent_path();
-    auto temp_file = parent_path / (path.filename().string() + ".tmp");
-    std::ofstream file(temp_file, std::ios::binary);
-    if(!file){
-        cout << "[HTTP] PUT request failed: Unable to open file for writing" << endl;
-        cout << "[HTTP] Path: " << path << endl;
-        co_await sender_.send_no_body_response(500);
-
-        std::error_code ignore_ec;
-        fs::remove(temp_file, ignore_ec);
-        throw std::runtime_error("PUT failed: cannot open file");
-    }
-
-    if(is_expect_continue){
-        co_await sender_.send_no_body_response(100);
-    }
-
-    size_t content_length = 0;
-    co_await receiver_.read_body(request, file, content_length);
-    file.close();
     
-    std::error_code ignore_ec;
-    fs::rename(temp_file, path, ignore_ec);
+    bool is_download_success = true;
+    size_t content_length = 0;
+    try{
+        http_file_system::TempName temp(path);
+        std::ofstream file(temp.get_path(), std::ios::binary);
+        if(!file){
+            cout << "[HTTP] PUT request failed: Unable to open file for writing" << endl;
+            cout << "[HTTP] Path: " << path << endl;
+
+            throw std::runtime_error("cannot open file");
+        }
+
+        if(is_expect_continue){
+            co_await sender_.send_no_body_response(100);
+        }
+
+        co_await receiver_.read_body(request, file, content_length);
+        file.close();
+        
+        fs::rename(temp.get_path(), path);
+    }
+    catch(const exception& e){
+        cerr << "[HTTP] PUT Failed: " << e.what() << endl;
+        is_download_success = false;
+    }
+    if(!is_download_success){
+        co_await sender_.send_no_body_response(500);
+        co_return;
+    }
 
     if(is_existing_file)
         co_await sender_.send_no_body_response(200);

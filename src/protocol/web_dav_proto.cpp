@@ -24,7 +24,7 @@ static std::u8string extract_path_from_destination(const std::string& dest_heade
             url = "/";
     }
     vector<uint8_t> url_bytes(url.begin(), url.end());
-    return url_decode(url_bytes);
+    return url_decode(url_bytes, true);
 }
 
 vector<string> WebDavProto::get_requests(const string& xml_body){
@@ -231,10 +231,11 @@ response_t WebDavProto::make_file_list_info(const request_t& request){
     int depth = 1;
 
     if(header.find("Depth") != header.end()){
-        std::string depth_str = header.at("Depth");
+        std::string depth_str = header.at("Depth")[0];
         if(depth_str == "0") depth = 0;
         else if(depth_str == "1") depth = 1;
         else if(depth_str == "infinity") depth = -1;
+        else depth = 0;
     }
 
     fs::path path(request.first.path());
@@ -269,7 +270,7 @@ response_t WebDavProto::copy_file(const request_t& request){
         return {response, ""};
     }
 
-    string dest_path_str = request.first.get_header("Destination");
+    string dest_path_str = request.first.get_header("Destination")[0];
     auto decoded_dest_path = extract_path_from_destination(dest_path_str);
 
     fs::path source_path(request.first.path());
@@ -277,7 +278,7 @@ response_t WebDavProto::copy_file(const request_t& request){
 
     bool is_overwrite = false;
     if(request.first.has_header("Overwrite")){
-        string overwrite_value = request.first.get_header("Overwrite");
+        string overwrite_value = request.first.get_header("Overwrite")[0];
         if(overwrite_value == "T" || overwrite_value == "t" || overwrite_value == "true" || overwrite_value == "TRUE")
             is_overwrite = true;
     }
@@ -298,7 +299,7 @@ response_t WebDavProto::move_file(const request_t& request){
         response.add_header("Content-Length", "0");
         return {response, ""};
     }
-    string dest_path_str = request.first.get_header("Destination");
+    string dest_path_str = request.first.get_header("Destination")[0];
     auto decoded_dest_path = extract_path_from_destination(dest_path_str);
 
     fs::path source_path(request.first.path());
@@ -306,7 +307,7 @@ response_t WebDavProto::move_file(const request_t& request){
 
     bool is_overwrite = false;
     if(request.first.has_header("Overwrite")){
-        string overwrite_value = request.first.get_header("Overwrite");
+        string overwrite_value = request.first.get_header("Overwrite")[0];
         if(overwrite_value == "T" || overwrite_value == "t" || overwrite_value == "true" || overwrite_value == "TRUE")
             is_overwrite = true;
     }

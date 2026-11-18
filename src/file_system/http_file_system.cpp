@@ -11,6 +11,97 @@ fs::path HttpFileSystem::get_root_path() const{
     return root_path_;
 }
 
+bool HttpFileSystem::copy(const fs::path& abs_source, const fs::path& abs_dest){
+    std::error_code ec;
+    fs::copy(abs_source, abs_dest, fs::copy_options::recursive, ec);
+    if(ec) return false;
+    return true;
+}
+bool HttpFileSystem::rename(const fs::path& abs_source, const fs::path& abs_dest){
+    std::error_code ec;
+    fs::rename(abs_source, abs_dest, ec);
+    if(ec) return false;
+    return true;
+}
+bool HttpFileSystem::remove(const fs::path& abs_path){
+    std::error_code ec;
+    fs::remove_all(abs_path, ec);
+    if(ec) return false;
+    return true;
+}
+
+bool HttpFileSystem::atomic_copy(const fs::path& abs_source, const fs::path& abs_dest){
+    try{
+        TempName backup_dest(abs_dest), temp(abs_dest);
+        if(!copy(abs_source, temp.get_path())) // copy source to temp_path in abs_dest's parent path
+            throw std::runtime_error("failed copy source -> temp.");
+
+        // backup abs_dest
+        std::error_code exists_ec;
+        bool is_exists_dest = fs::exists(abs_dest, exists_ec) && !exists_ec;
+        if(is_exists_dest){
+            if(!rename(abs_dest, backup_dest.get_path())){
+                std::cerr << "[atomic copy] failed make backup file.\n\tRecovering ..." << std::endl;
+                if(!remove(temp.get_path()))
+                    std::cerr << "[atomic copy] failed recovery." << std::endl;
+                throw std::runtime_error("failed backup destination.");
+            }
+        }
+
+        // move temp to abs_dest
+        if(!rename(temp.get_path(), abs_dest)){
+            std::cerr << "[atomic copy] failed copy file.\n\tRecovering ..." << std::endl;
+            if((is_exists_dest && !rename(backup_dest.get_path(), abs_dest)) || !remove(temp.get_path()))
+                std::cerr << "[atomic copy] failed recovery." << std::endl;
+            throw std::runtime_error("failed move temp -> destination.");
+        }
+
+        if(is_exists_dest && !remove(backup_dest.get_path()))
+            throw std::runtime_error("failed remove backup file.");
+    }
+    catch(const std::exception& e){
+        std::cerr << "[atomic copy] failed: " << e.what() << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool HttpFileSystem::atomic_move(const fs::path& abs_source, const fs::path& abs_dest){
+    try{
+        TempName backup_dest(abs_dest), temp(abs_dest);
+        if(!copy(abs_source, temp.get_path())) // copy source to temp_path in abs_dest's parent path
+            throw std::runtime_error("failed move source -> temp.");
+
+        // backup abs_dest
+        std::error_code exists_ec;
+        bool is_exists_dest = fs::exists(abs_dest, exists_ec) && !exists_ec;
+        if(is_exists_dest){
+            if(!rename(abs_dest, backup_dest.get_path())){
+                std::cerr << "[atomic move] failed make backup file.\n\tRecovering ..." << std::endl;
+                if(!remove(temp.get_path()))
+                    std::cerr << "[atomic move] failed recovery." << std::endl;
+                throw std::runtime_error("failed backup destination.");
+            }
+        }
+
+        // move temp to abs_dest
+        if(!rename(temp.get_path(), abs_dest)){
+            std::cerr << "[atomic move] failed move file.\n\tRecovering ..." << std::endl;
+            if((is_exists_dest && !rename(backup_dest.get_path(), abs_dest)) || !remove(temp.get_path()))
+                std::cerr << "[atomic move] failed recovery." << std::endl;
+            throw std::runtime_error("failed move temp -> destination.");
+        }
+
+        if(!remove(abs_source) || (is_exists_dest && !remove(backup_dest.get_path())))
+            throw std::runtime_error("failed remove temp & backup file.");
+    }
+    catch(const std::exception& e){
+        std::cerr << "[atomic move] failed: " << e.what() << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // 경로 검사 (이미 절대 경로가 전달된다고 가정)
 bool HttpFileSystem::is_valid_path(const fs::path& path){
     std::error_code ec;
@@ -25,6 +116,7 @@ bool HttpFileSystem::is_valid_path(const fs::path& path){
         if(it_path == canonical.end() || *it_path != *it_root)
             return false;
     }
+
     return true;
 }
 
@@ -35,58 +127,47 @@ fs::path HttpFileSystem::get_absolute_path(const fs::path& path){
 
 // 파일 이동
 int HttpFileSystem::move_file(const fs::path& source_path, const fs::path& dest_path, bool is_overwrite){
+    const bool is_dir_dest = is_directory(dest_path);
     const auto& abs_source = get_absolute_path(source_path);
-    const auto& abs_dest   = get_absolute_path(dest_path);
+    auto abs_dest   = get_absolute_path(dest_path);
     if(!is_valid_path(abs_source) || !is_valid_path(abs_dest)){
         std::cout << "[move_file] invalid path" << std::endl;
         return 403; // Forbidden
     }
 
-    std::error_code existst_ec;
-    bool is_exists_source = fs::exists(abs_source, existst_ec);
-    if(existst_ec){
-        std::cout << "[move_file] exists source: " << abs_source.string() << " failed" << std::endl;
-        return 500;
+    std::error_code exists_ec;
+    if(!fs::exists(abs_source, exists_ec) || exists_ec){
+        std::cout << "[move_file] source: " << abs_source.string() << " is not exists" << std::endl;
+        return 404;
     }
-    if(!is_exists_source){
-        std::cout << "[move_file] not exists source: " << std::endl;
-        return 404; // Not Found
-    }
-
-    bool is_exists_dest = fs::exists(abs_dest, existst_ec);
-    if(existst_ec){
-        std::cout << "[move_file] exists destination: " << abs_dest.string() << " failed" << std::endl;
-        return 500;
-    }
+    bool is_exists_dest = fs::exists(abs_dest, exists_ec) && !exists_ec;
     if(is_exists_dest && !is_overwrite){
-        std::cout << "[move_file] source exists " << abs_source.string() << " but not set overwrite option" << std::endl;
+        std::cout << "[move_file] destination exists " << abs_dest.string() << " but not set overwrite option" << std::endl;
         return 409; // Conflict
     }
 
-    std::error_code ec;
-    auto temp_path = borrow_temp_path(abs_dest);
-    if(is_exists_dest){
-        fs::rename(abs_dest, temp_path, ec);
-        if(ec){
-            std::cout << "[move_file] destination: " << abs_dest.string() << " move temp_path failed" << std::endl;
-            return_temp_path(temp_path);
-            return 500;
-        }
+    if(is_sub_path(abs_source, abs_dest)){
+        std::cout << "[move_file] source: " << abs_source.string() << " is parent of destination: " << abs_dest.string() << std::endl;
+        return 400;
     }
-    
-    fs::rename(abs_source, abs_dest);
-    if(ec){
-        std::cout << "[move_file] move failed " << std::endl;
-        if(is_exists_dest)
-            fs::rename(temp_path, abs_dest, std::error_code{});
 
-        return_temp_path(temp_path);
-        return 500; // Internal Server Error
+    if(is_dir_dest)
+        abs_dest = abs_dest / (abs_source.filename() != "" ? abs_source.filename() : abs_source.parent_path().filename());
+
+    std::error_code equiv_ec;
+    if(fs::equivalent(abs_dest, abs_source, equiv_ec) && !equiv_ec){
+        return 200; //같은 파일의 이동은 이동한 것으로 판정.
     }
-    if(is_exists_dest)
-        fs::remove_all(temp_path, std::error_code{});
+    else if(equiv_ec){
+        std::cout << "[move_file] validation check error(filesystem error): " << equiv_ec.message() << std::endl;
+        return 500;
+    }
 
-    return_temp_path(temp_path);
+    if(!atomic_move(abs_source, abs_dest)){
+        std::cout << "[move_file] filesystem error" << std::endl;
+        return 500;
+    }
+
     return 200; // OK
 }
 
@@ -95,62 +176,85 @@ int HttpFileSystem::delete_file(const fs::path& file_path){
     const auto& abs_path = get_absolute_path(file_path);
     const auto& abs_root = root_path_;
     std::error_code equiv_ec;
-    if(!is_valid_path(abs_path) || fs::equivalent(abs_path, abs_root, equiv_ec) || equiv_ec)
+    if(!is_valid_path(abs_path) || fs::equivalent(abs_path, abs_root, equiv_ec) || equiv_ec){
+        std::cout << "[delete_file] invalid path: " << abs_path.string() << std::endl;
         return 403; // Forbidden
-
-    if(!fs::exists(abs_path))
+    }
+    if(!fs::exists(abs_path)){
+        std::cout << "[delete_file] target path: " << abs_path.string() << " not exists" << std::endl;
         return 404; // Not Found
-    
-    std::error_code ec;
-    fs::remove_all(abs_path, ec);
-    if(ec)
-        return 500; // Internal Server Error
+    }
+    if(!remove(abs_path)){
+        std::cout << "[delete_file] filesystem error" << std::endl;
+        return 500;
+    }
+
     return 200; // OK
 }
 
 // 디렉토리 생성
 int HttpFileSystem::create_directory(const fs::path& dir_path, bool is_recursive){
     const auto& abs_path = get_absolute_path(dir_path);
-    if(!is_valid_path(abs_path))
+    if(!is_valid_path(abs_path)){
+        std::cout << "[create_directory] invalid path: " << abs_path.string() << std::endl;
         return 403; // Forbidden
-    
+    }
     std::error_code ec;
     if(is_recursive)
         fs::create_directories(abs_path, ec);
     else
         fs::create_directory(abs_path, ec);
     
-    if(ec)
+    if(ec){
+        std::cout << "[create_directory] create directory error" << std::endl;
         return 500; // Internal Server Error
+    }
     return 200; // OK
 }
 
 // 파일 복사
 int HttpFileSystem::copy_file(const fs::path& source_path, const fs::path& dest_path, bool is_overwrite){
+    const bool is_dir_dest = is_directory(dest_path);
     const auto& abs_source = get_absolute_path(source_path);
-    const auto& abs_dest   = get_absolute_path(dest_path);
+    auto abs_dest   = get_absolute_path(dest_path);
     if(!is_valid_path(abs_source) || !is_valid_path(abs_dest))
         return 403; // Forbidden
     
-    if(!fs::exists(abs_source))
-        return 404; // Not Found
-
-    if(fs::exists(abs_dest)){
-        if(!is_overwrite)
-            return 409; // Conflict
-        
-        // 덮어쓰기일 경우, 소스와 대상이 서로 다른 타입이면 대상 삭제
-        bool is_source_dir = fs::is_directory(abs_source);
-        bool is_dest_dir   = fs::is_directory(abs_dest);
-        if(is_source_dir != is_dest_dir && is_overwrite)
-            fs::remove_all(abs_dest);
+    std::error_code exists_ec;
+    if(!fs::exists(abs_source, exists_ec) || exists_ec){
+        std::cout << "[copy_file] source: " << abs_source.string() << " is not exists" << std::endl;
+        return 404;
     }
 
-    std::error_code ec;
-    fs::copy(abs_source, abs_dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    if(ec)
-        return 500; // Internal Server Error
-    return 200; // OK
+    bool is_exists_dest = fs::exists(abs_dest, exists_ec) && !exists_ec;
+    if(is_exists_dest && !is_overwrite){
+        std::cout << "[copy_file] destination exists " << abs_dest.string() << " but not set overwrite option" << std::endl;
+        return 409;
+    }
+
+    if(is_sub_path(abs_source, abs_dest)){
+        std::cout << "[copy_file] source: " << abs_source.string() << " is parent of destination: " << abs_dest.string() << std::endl;
+        return 400;
+    }
+
+    if(is_dir_dest)
+        abs_dest = abs_dest / (abs_source.filename() != "" ? abs_source.filename() : abs_source.parent_path().filename());
+
+    std::error_code equiv_ec;
+    if(fs::equivalent(abs_dest, abs_source, equiv_ec) && !equiv_ec){
+        return 200; //같은 파일의 복사 복사한 것으로 판정.
+    }
+    else if(equiv_ec){
+        std::cout << "[copy_file] validation check error(filesystem error): " << equiv_ec.message() << std::endl;
+        return 500;
+    }
+
+    if(!atomic_copy(abs_source, abs_dest)){
+        std::cout << "[copy_file] filesystem error" << std::endl;
+        return 500;
+    }
+
+    return 200;
 }
 
 // 루트 경로 설정
@@ -254,7 +358,16 @@ bool HttpFileSystem::is_directory(const fs::path& path){
 }
 
 bool HttpFileSystem::is_exists(const fs::path& path){
-    return fs::exists(get_absolute_path(path));
+    std::error_code ec;
+    return fs::exists(get_absolute_path(path), ec) && !ec;
+}
+
+bool HttpFileSystem::is_sub_path(const fs::path& parent, const fs::path& child){
+    fs::path p = fs::weakly_canonical(parent);
+    fs::path c = fs::weakly_canonical(child);
+    fs::path rel = c.lexically_relative(p);
+
+    return !rel.empty() && *rel.begin() != "..";
 }
 
 HttpFileSystem::HttpFileSystem(const fs::path& root_path): root_path_(fs::canonical(root_path)) {}

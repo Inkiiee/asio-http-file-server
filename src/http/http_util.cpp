@@ -4,6 +4,7 @@
 #include <iostream>
 #include <algorithm>
 #include <limits>
+#include <unordered_set>
 
 using namespace std;
 using namespace http_parser;
@@ -68,7 +69,15 @@ namespace http_sub_functions{
     }
 }
 
-http_base::HttpRequest Parser::parse_request(){
+namespace {
+    inline const std::unordered_set<std::string> only_one_headers_name{
+        "host", "content-length", "content-type", "location", 
+        "authorization", "proxy-authorization", "from", "max-forwards", "if-unmodified-since", "if-range",
+        "date", "expires", "last-modified", "age", "retry-after"
+    };
+}
+
+optional<http_base::HttpRequest> Parser::parse_request(){
     http_base::HttpRequest request;
 
     stringstream stream(buffer_);
@@ -84,7 +93,7 @@ http_base::HttpRequest Parser::parse_request(){
 
     //url decode the path
     vector<uint8_t> path_bytes(path_raw.begin(), path_raw.end());
-    auto path_decoded = http_base::url_decode(path_bytes);
+    auto path_decoded = http_base::url_decode(path_bytes, true);
     request.set_path(path_decoded);
 
     // Parse headers
@@ -105,14 +114,21 @@ http_base::HttpRequest Parser::parse_request(){
                 value = value.substr(start);
             else
                 value.clear();
+
+            if(only_one_headers_name.find(key) != only_one_headers_name.end() 
+                && (request.has_header(key) || value.find(',') != string::npos))
+                return nullopt;
+
             request.add_header(key, value);
         }
     }
 
+    if(request.has_header("content-length") && request.has_header("transfer-encoding")) return nullopt;
+
     return request;
 }
 
-http_base::HttpResponse Parser::parse_response(){
+optional<http_base::HttpResponse> Parser::parse_response(){
     http_base::HttpResponse response;
 
     stringstream stream(buffer_);
@@ -141,8 +157,15 @@ http_base::HttpResponse Parser::parse_response(){
                 value = value.substr(start);
             else
                 value.clear();
+
+            if(only_one_headers_name.find(key) != only_one_headers_name.end() 
+                && (response.has_header(key) || value.find(',') != string::npos))
+                return nullopt;
+
             response.add_header(key, value);
         }
+
+        if(response.has_header("content-length") && response.has_header("transfer-encoding")) return nullopt;
     }
 
     return response;
@@ -152,13 +175,19 @@ string Maker::make_response(const http_base::HttpResponse& response){
     stringstream stream;
     stream << response.version() << " " << response.status_code() << " " << response.status_text() << "\r\n";
     for(const auto& header : response.headers()){
-        stream << header.first << ": " << header.second << "\r\n";
+        stream << header.first << ": ";
+        for(int i=0; i < header.second.size() - 1; i++)
+            stream << header.second[i] << ", ";
+        stream << header.second[header.second.size() - 1] << "\r\n";
     }
     stream << "\r\n";
 
     cout << "[HTTP] Sending response: " << response.status_code() << " " << response.status_text() << endl;
     for(const auto& header : response.headers()){
-        cout << "[HTTP] Header: " << header.first << ": " << header.second << endl;
+        cout << "[HTTP] Header: " << header.first << ": ";
+        for(int i=0; i < header.second.size() - 1; i++)
+            cout << header.second[i] << ", ";
+        cout << header.second[header.second.size() - 1] << endl;
     }
     return stream.str();
 }
@@ -168,7 +197,10 @@ string Maker::make_request(const http_base::HttpRequest& request){
     string path = string(request.path().begin(), request.path().end());
     stream << request.method() << " " << path << " " << request.version() << "\r\n";
     for(const auto& header : request.headers()){
-        stream << header.first << ": " << header.second << "\r\n";
+        stream << header.first << ": ";
+        for(int i=0; i < header.second.size() - 1; i++)
+            stream << header.second[i] << ", ";
+        stream << header.second[header.second.size() - 1] << "\r\n";
     }
     stream << "\r\n";
     return stream.str();

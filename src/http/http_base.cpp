@@ -14,12 +14,26 @@ void HttpRequest::set_path(const std::u8string& path) { path_ = path; }
 void HttpRequest::set_version(const std::string& version) { version_ = version; }
 const header_map& HttpRequest::headers() const { return headers_; }
 bool HttpRequest::has_header(const std::string& key) const { return headers_.find(key) != headers_.end(); }
-std::string HttpRequest::get_header(const std::string& key) const {
+const std::vector<std::string>& HttpRequest::get_header(const std::string& key) const {
     auto it = headers_.find(key);
-    return it != headers_.end() ? it->second : "";
+    return it != headers_.end() ? it->second : std::vector<std::string>{""};
 }
 void HttpRequest::remove_header(const std::string& key) { headers_.erase(key); }
-void HttpRequest::add_header(const std::string& key, const std::string& value) { headers_[key] = value; }
+void HttpRequest::add_header(const std::string& key, const std::string& value) {
+    if(headers_.find(key) == headers_.end()){
+        headers_[key] = std::vector<std::string>();
+        headers_[key].reserve(5);
+    }
+
+    auto start = value.find_first_not_of(' ');
+    auto pos = value.length();
+    while((pos = value.find(',', start)) != std::string::npos){
+        int len = pos - start;
+        headers_[key].push_back(value.substr(start, len));
+        start = value.find_first_not_of(pos + 1, ' ');
+    }
+    headers_[key].push_back(value.substr(start));
+}
 void HttpRequest::clear_headers() { headers_.clear(); }
 
 // HTTP Response implementation
@@ -31,14 +45,28 @@ const std::string& HttpResponse::version() const { return version_; }
 int HttpResponse::status_code() const { return status_code_; }
 const std::string& HttpResponse::status_text() const { return status_text_; }
 const header_map& HttpResponse::headers() const { return headers_; }
-std::string HttpResponse::get_header(const std::string& key) const {
+const std::vector<std::string>& HttpResponse::get_header(const std::string& key) const {
     auto it = headers_.find(key);
-    return it != headers_.end() ? it->second : "";
+    return it != headers_.end() ? it->second : std::vector<std::string>{""};
 }
 void HttpResponse::set_version(const std::string& version){ version_ = version; }
 void HttpResponse::set_status_code(int status_code){ status_code_ = status_code; status_text_ = get_status_text_(status_code); }
 void HttpResponse::set_status_text(const std::string& status_text){ status_text_ = status_text; }
-void HttpResponse::add_header(const std::string& key, const std::string& value){ headers_[key] = value; }
+void HttpResponse::add_header(const std::string& key, const std::string& value){
+    if(headers_.find(key) == headers_.end()){
+        headers_[key] = std::vector<std::string>();
+        headers_[key].reserve(5);
+    }
+
+    auto start = value.find_first_not_of(' ');
+    auto pos = value.length();
+    while((pos = value.find(',', start)) != std::string::npos){
+        int len = pos - start;
+        headers_[key].push_back(value.substr(start, len));
+        start = value.find_first_not_of(pos + 1, ' ');
+    }
+    headers_[key].push_back(value.substr(start));
+}
 bool HttpResponse::has_header(const std::string& key) const{ return headers_.find(key) != headers_.end(); }
 void HttpResponse::remove_header(const std::string& key) { headers_.erase(key); }
 void HttpResponse::clear_headers(){ headers_.clear(); }
@@ -143,7 +171,7 @@ namespace http_base{
         return encoded;
     }
 
-    std::u8string url_decode(const std::vector<uint8_t>& encoded){
+    std::u8string url_decode(const std::vector<uint8_t>& encoded, bool is_path){
         std::vector<uint8_t> decoded;
         decoded.reserve(encoded.size());
 
@@ -163,7 +191,7 @@ namespace http_base{
                     continue;
                 }
             }
-            if(encoded[i] == '+')
+            if(encoded[i] == '+' && !is_path)
                 decoded.push_back(' ');
             else
                 decoded.push_back(encoded[i]);
@@ -183,22 +211,6 @@ namespace http_base{
                 case '"':  result += "&quot;"; break;
                 case '\'': result += "&#39;";  break;
                 default:   result += c;        break;
-            }
-        }
-        return result;
-    }
-
-    std::string json_escape(const std::string& text){
-        std::string result;
-        result.reserve(text.size());
-        for(char c : text){
-            switch(c){
-                case '"':  result += "\\\""; break;
-                case '\\': result += "\\\\"; break;
-                case '\n': result += "\\n";  break;
-                case '\r': result += "\\r";  break;
-                case '\t': result += "\\t";  break;
-                default:   result += c;      break;
             }
         }
         return result;
