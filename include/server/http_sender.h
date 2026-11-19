@@ -27,7 +27,6 @@ namespace http_file_server{
         virtual ~HttpSender() = default;
 
         asio::awaitable<void> send_no_body_response(const http_base::HttpResponse& response);
-        asio::awaitable<void> send_no_body_response(int status_code);
         template<typename T>
         asio::awaitable<void> send_response(const http_base::HttpResponse& response, T& body);
     private:
@@ -42,32 +41,28 @@ namespace http_file_server{
 
     template<typename T>
     asio::awaitable<void> HttpSender::send_response(const http_base::HttpResponse& response, T& body){
-        auto response_to_send = response;
-        const bool skip_body = http_sub_functions::response_must_not_have_body(response_to_send.status_code());
-        if(skip_body){
-            response_to_send.remove_header("Transfer-Encoding");
-            
-            if(response_to_send.has_header("Content-Length"))
-                response_to_send.remove_header("Content-Length");
-            response_to_send.add_header("Content-Length", "0");
-        }
-
-        auto response_str = http_maker::Maker::make_response(response_to_send);
-
-        auto [ec, bytes_transferred] = co_await asio::async_write(*psocket_, asio::buffer(response_str), asio::as_tuple);
-        (void)bytes_transferred;
-        if(ec){
-            throw std::runtime_error("Error writing response: " + ec.message());
-        }
-        if(skip_body)
+        if(http_sub_functions::response_must_not_have_body(response.status_code())){
+            co_await send_no_body_response(response);
             co_return;
-
-        if(response_to_send.has_header("Transfer-Encoding") && http_sub_functions::header_has_token(response_to_send.get_header("Transfer-Encoding")[0], "chunked"))
-            co_await send_chunked_body(body);
-        else if(response_to_send.has_header("Content-Length")){
-            std::size_t content_length = std::stoul(response_to_send.get_header("Content-Length")[0]);
-            co_await send_fixed_body(body, content_length);
         }
+
+        if(response.has_header("Transfer-Encoding")){
+            const auto& codings = response.get_header("Transfer-Encoding");
+            if(response.has_header("Content-Length") || codings.size() != 1 ||
+               !http_sub_functions::iequals(codings.front(), "chunked"))
+                throw std::runtime_error("Invalid response Transfer-Encoding");
+            co_await send_no_body_response(response);
+            co_await send_chunked_body(body);
+            co_return;
+        }
+
+        const auto& lengths = response.get_header("Content-Length");
+        auto length = lengths.size() == 1 ? http_base::str_to_num(lengths.front()) : std::nullopt;
+        if(!length)
+            throw std::runtime_error("Missing or invalid response Content-Length");
+
+        co_await send_no_body_response(response);
+        co_await send_fixed_body(body, *length);
     }
 
     template<typename T>
@@ -131,7 +126,8 @@ namespace http_file_server{
                 std::vector<char> buffer(current_chunk_size);
                 body.read(buffer.data(), current_chunk_size);
                 auto bytes_actually_read = static_cast<std::size_t>(body.gcount());
-                if(bytes_actually_read <= 0) break;
+                if(bytes_actually_read == 0)
+                    throw std::runtime_error("Response stream ended before its announced length");
                 std::stringstream chunk_header;
                 chunk_header << std::hex << bytes_actually_read << "\r\n";
 
@@ -164,7 +160,9 @@ namespace http_file_server{
         std::size_t offset = 0;
 
         if constexpr (std::is_same_v<T, std::string>){
-            total_size = std::min(body.size(), content_length);
+            if(body.size() < content_length)
+                throw std::runtime_error("Response body is shorter than Content-Length");
+            total_size = content_length;
             while(offset < total_size){
                 std::size_t current_chunk_size = std::min(io_chunk_size_, total_size - offset);
                 std::string chunk_data = body.substr(offset, current_chunk_size);
@@ -177,7 +175,9 @@ namespace http_file_server{
             }
         }
         else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>> || std::is_same_v<T, std::vector<char>>){
-            total_size = std::min(body.size(), content_length);
+            if(body.size() < content_length)
+                throw std::runtime_error("Response body is shorter than Content-Length");
+            total_size = content_length;
             while(offset < total_size){
                 std::size_t current_chunk_size = std::min(io_chunk_size_, total_size - offset);
                 std::string chunk_data(body.begin() + offset, body.begin() + offset + current_chunk_size);
@@ -197,7 +197,8 @@ namespace http_file_server{
                 std::vector<char> buffer(current_chunk_size);
                 body.read(buffer.data(), current_chunk_size);
                 auto bytes_actually_read = body.gcount();
-                if(bytes_actually_read <= 0) break;
+                if(bytes_actually_read <= 0)
+                    throw std::runtime_error("Response stream ended before Content-Length bytes were sent");
                 auto [ec, bytes_transferred] = co_await asio::async_write(*psocket_, asio::buffer(buffer.data(), bytes_actually_read), asio::as_tuple);
                 (void)bytes_transferred;
                 if(ec){

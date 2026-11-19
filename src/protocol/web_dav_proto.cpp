@@ -205,27 +205,42 @@ string WebDavProto::get_response(const fs::path& path, int depth){
 }
 
 response_t WebDavProto::make_file_info(const request_t& request){
+    auto abs_path = file_system_.get_absolute_path(request.first.path());
+    if(!file_system_.is_valid_path(abs_path)){
+        HttpResponse response;
+        response.set_status_code(400);
+        response.set_header("Content-Length", "0");
+        return {response, ""};
+    }
+
     set_xml_body(request.second);
-    const auto& header = request.first.headers();
     int depth = 0;
 
     fs::path path(request.first.path());
     if(!file_system_.is_exists(path)){
         HttpResponse response;
         response.set_status_code(404);
-        response.add_header("Content-Length", "0");
+        response.set_header("Content-Length", "0");
         return {response, ""};
     }
 
     string body =  get_response(path, depth);
     HttpResponse response;
     response.set_status_code(207);
-    response.add_header("Content-Type", "application/xml; charset=utf-8");
-    response.add_header("Content-Length", std::to_string(body.size()));
+    response.set_header("Content-Type", "application/xml; charset=utf-8");
+    response.set_header("Content-Length", std::to_string(body.size()));
     return {response, body};
 }
 
 response_t WebDavProto::make_file_list_info(const request_t& request){
+    auto abs_path = file_system_.get_absolute_path(request.first.path());
+    if(!file_system_.is_valid_path(abs_path)){
+        HttpResponse response;
+        response.set_status_code(400);
+        response.set_header("Content-Length", "0");
+        return {response, ""};
+    }
+
     set_xml_body(request.second);
     const auto& header = request.first.headers();
     int depth = 1;
@@ -242,15 +257,15 @@ response_t WebDavProto::make_file_list_info(const request_t& request){
     if(!file_system_.is_exists(path)){
         HttpResponse response;
         response.set_status_code(404);
-        response.add_header("Content-Length", "0");
+        response.set_header("Content-Length", "0");
         return {response, ""};
     }
 
     string body = get_response(path, depth);
     HttpResponse response;
     response.set_status_code(207);
-    response.add_header("Content-Type", "application/xml; charset=utf-8");
-    response.add_header("Content-Length", std::to_string(body.size()));
+    response.set_header("Content-Type", "application/xml; charset=utf-8");
+    response.set_header("Content-Length", std::to_string(body.size()));
     return {response, body};
 }
 
@@ -266,7 +281,7 @@ response_t WebDavProto::copy_file(const request_t& request){
     if(!request.first.has_header("Destination")){
         HttpResponse response;
         response.set_status_code(400);
-        response.add_header("Content-Length", "0");
+        response.set_header("Content-Length", "0");
         return {response, ""};
     }
 
@@ -288,7 +303,7 @@ response_t WebDavProto::copy_file(const request_t& request){
 
     HttpResponse response;
     response.set_status_code(result_code);
-    response.add_header("Content-Length", "0");
+    response.set_header("Content-Length", "0");
     return {response, ""};
 }
 
@@ -296,7 +311,7 @@ response_t WebDavProto::move_file(const request_t& request){
     if(!request.first.has_header("Destination")){
         HttpResponse response;
         response.set_status_code(400);
-        response.add_header("Content-Length", "0");
+        response.set_header("Content-Length", "0");
         return {response, ""};
     }
     string dest_path_str = request.first.get_header("Destination")[0];
@@ -316,7 +331,7 @@ response_t WebDavProto::move_file(const request_t& request){
     if(result_code == 200) result_code = 201; // Created
     HttpResponse response;
     response.set_status_code(result_code);
-    response.add_header("Content-Length", "0");
+    response.set_header("Content-Length", "0");
     return {response, ""};
 }
 
@@ -327,7 +342,7 @@ response_t WebDavProto::delete_file(const request_t& request){
 
     HttpResponse response;
     response.set_status_code(result_code);
-    response.add_header("Content-Length", "0");
+    response.set_header("Content-Length", "0");
     return {response, ""};
 }
 
@@ -337,7 +352,7 @@ response_t WebDavProto::create_directory(const request_t& request){
     if(result_code == 200) result_code = 201; // Created
     HttpResponse response;
     response.set_status_code(result_code);
-    response.add_header("Content-Length", "0");
+    response.set_header("Content-Length", "0");
     return {response, ""};
 }
 
@@ -396,8 +411,8 @@ response_t WebDavProto::proppatch(const request_t& request){
 
     HttpResponse response;
     response.set_status_code(207);
-    response.add_header("Content-Type", "application/xml; charset=utf-8");
-    response.add_header("Content-Length", std::to_string(body.size()));
+    response.set_header("Content-Type", "application/xml; charset=utf-8");
+    response.set_header("Content-Length", std::to_string(body.size()));
     return {response, body};
 }
 
@@ -437,8 +452,8 @@ response_t WebDavProto::lock_resource(const request_t& request){
 
     HttpResponse response;
     response.set_status_code(200);
-    response.add_header("Content-Type", "application/xml; charset=utf-8");
-    response.add_header("Content-Length", std::to_string(body.size()));
-    response.add_header("Lock-Token", "<" + lock_token + ">");
+    response.set_header("Content-Type", "application/xml; charset=utf-8");
+    response.set_header("Content-Length", std::to_string(body.size()));
+    response.set_header("Lock-Token", "<" + lock_token + ">");
     return {response, body};
 }

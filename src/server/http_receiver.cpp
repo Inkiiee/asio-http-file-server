@@ -15,7 +15,10 @@ using namespace http_parser;
 using asio::awaitable;
 using asio::as_tuple;
 
-awaitable<bool> HttpReceiver::read_request(http_base::HttpRequest& request, bool& is_need_close){
+awaitable<bool> HttpReceiver::read_request(http_base::HttpRequest& request){
+    if(!body_complete())
+        throw std::logic_error("Previous request body was not consumed");
+
     auto [ec, bytes_transferred] = co_await async_read_until(*psocket_, asio::dynamic_buffer(buf_), "\r\n\r\n", as_tuple);
     if(ec) throw std::runtime_error("Connection closed: " + ec.message());
 
@@ -28,19 +31,32 @@ awaitable<bool> HttpReceiver::read_request(http_base::HttpRequest& request, bool
         co_return false;
     }
 
-    request = *parse_request;
-    string method = request.method();
-    auto path = request.path();
-    string path_str(path.begin(), path.end());
-    string version = request.version();
-
-    if(request.has_header("Connection") && header_has_token(request.get_header("Connection")[0], "close")
-        || request.version() == "HTTP/1.0")
-        is_need_close = true;
-    else
-        is_need_close = false;
+    request = std::move(*parse_request);
+    if(request.has_header("Transfer-Encoding")){
+        const auto& codings = request.get_header("Transfer-Encoding");
+        if(request.version() != "HTTP/1.1" || request.has_header("Content-Length") ||
+           codings.size() != 1 || !iequals(codings.front(), "chunked"))
+            co_return false;
+        body_framing_ = BodyFraming::chunked;
+    }
+    else if(request.has_header("Content-Length")){
+        const auto& lengths = request.get_header("Content-Length");
+        auto length = lengths.size() == 1 ? str_to_num(lengths.front()) : nullopt;
+        if(!length)
+            co_return false;
+        if(*length > 0){
+            body_length_ = *length;
+            body_framing_ = BodyFraming::fixed;
+        }
+    }
 
     co_return true;
+}
+
+awaitable<void> HttpReceiver::discard_body(){
+    std::nullptr_t discard = nullptr;
+    std::size_t discarded = 0;
+    co_await read_body(discard, discarded);
 }
 
 awaitable<void> HttpReceiver::read_until(std::string& buffer, const std::string& delimiter){

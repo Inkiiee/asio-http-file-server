@@ -69,8 +69,12 @@ bool HttpFileSystem::atomic_copy(const fs::path& abs_source, const fs::path& abs
 bool HttpFileSystem::atomic_move(const fs::path& abs_source, const fs::path& abs_dest){
     try{
         TempName backup_dest(abs_dest), temp(abs_dest);
-        if(!copy(abs_source, temp.get_path())) // copy source to temp_path in abs_dest's parent path
-            throw std::runtime_error("failed move source -> temp.");
+        bool is_source_copy = false;
+        if(!rename(abs_source, temp.get_path())){
+             if(!copy(abs_source, temp.get_path()))
+                throw std::runtime_error("failed move source -> temp.");
+            is_source_copy = true;
+        }
 
         // backup abs_dest
         std::error_code exists_ec;
@@ -78,7 +82,9 @@ bool HttpFileSystem::atomic_move(const fs::path& abs_source, const fs::path& abs
         if(is_exists_dest){
             if(!rename(abs_dest, backup_dest.get_path())){
                 std::cerr << "[atomic move] failed make backup file.\n\tRecovering ..." << std::endl;
-                if(!remove(temp.get_path()))
+                if(is_source_copy && !remove(temp.get_path()))
+                    std::cerr << "[atomic move] failed recovery." << std::endl;
+                if(!is_source_copy && !rename(temp.get_path(), abs_source))
                     std::cerr << "[atomic move] failed recovery." << std::endl;
                 throw std::runtime_error("failed backup destination.");
             }
@@ -87,12 +93,16 @@ bool HttpFileSystem::atomic_move(const fs::path& abs_source, const fs::path& abs
         // move temp to abs_dest
         if(!rename(temp.get_path(), abs_dest)){
             std::cerr << "[atomic move] failed move file.\n\tRecovering ..." << std::endl;
-            if((is_exists_dest && !rename(backup_dest.get_path(), abs_dest)) || !remove(temp.get_path()))
-                std::cerr << "[atomic move] failed recovery." << std::endl;
+            if((is_exists_dest && !rename(backup_dest.get_path(), abs_dest)))
+                std::cerr << "[atomic move] failed reload backup -> destination." << std::endl;
+            if(is_source_copy && !remove(temp.get_path()))
+                std::cerr << "[atomic move] failed delete temp file." << std::endl;
+            if(!is_source_copy && !rename(temp.get_path(), abs_source))
+                std::cerr << "[atomic move] failed reload temp -> source." << std::endl;
             throw std::runtime_error("failed move temp -> destination.");
         }
 
-        if(!remove(abs_source) || (is_exists_dest && !remove(backup_dest.get_path())))
+        if((is_source_copy && !remove(abs_source)) || (is_exists_dest && !remove(backup_dest.get_path())))
             throw std::runtime_error("failed remove temp & backup file.");
     }
     catch(const std::exception& e){
@@ -175,15 +185,23 @@ int HttpFileSystem::move_file(const fs::path& source_path, const fs::path& dest_
 int HttpFileSystem::delete_file(const fs::path& file_path){
     const auto& abs_path = get_absolute_path(file_path);
     const auto& abs_root = root_path_;
-    std::error_code equiv_ec;
-    if(!is_valid_path(abs_path) || fs::equivalent(abs_path, abs_root, equiv_ec) || equiv_ec){
+    if(!is_valid_path(abs_path)){
         std::cout << "[delete_file] invalid path: " << abs_path.string() << std::endl;
         return 403; // Forbidden
     }
-    if(!fs::exists(abs_path)){
+
+    std::error_code exists_ec;
+    if(!fs::exists(abs_path, exists_ec) || exists_ec){
         std::cout << "[delete_file] target path: " << abs_path.string() << " not exists" << std::endl;
         return 404; // Not Found
     }
+
+    std::error_code equiv_ec;
+    if(fs::equivalent(abs_path, abs_root, equiv_ec) || equiv_ec){
+        std::cout << "[delete_file] invalid path: " << abs_path.string() << std::endl;
+        return 403; // Forbidden
+    }
+
     if(!remove(abs_path)){
         std::cout << "[delete_file] filesystem error" << std::endl;
         return 500;

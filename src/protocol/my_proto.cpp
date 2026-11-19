@@ -34,16 +34,22 @@ string MyProto::serialize() const{
 }
 
 response_t MyProto::make_file_info(const request_t& request){
-    data_.clear();
-
     fs::path file_path = request.first.path();
+    auto abs_path = file_system_.get_absolute_path(file_path);
+    if(!file_system_.is_valid_path(abs_path)){
+        HttpResponse response;
+        response.set_status_code(400);
+        response.set_header("Content-Length", "0");
+        return {response, ""};
+    }
     if(!file_system_.is_exists(file_path)){
         HttpResponse response;
         response.set_status_code(404);
-        response.add_header("Content-Length", "0");
+        response.set_header("Content-Length", "0");
         return {response, ""};
     }
     
+    data_.clear();
     auto entry = file_system_.get_file_entry(file_path);
     
     auto encoded_name = url_encode(entry.name);
@@ -59,21 +65,28 @@ response_t MyProto::make_file_info(const request_t& request){
     
     HttpResponse response;
     response.set_status_code(200);
-    response.add_header("Content-Type", "application/json");
-    response.add_header("Content-Length", to_string(data_.size()));
+    response.set_header("Content-Type", "application/json");
+    response.set_header("Content-Length", to_string(data_.size()));
     return {response, serialize()};
 }
 response_t MyProto::make_file_list_info(const request_t& request){
-    data_.clear();
-
     fs::path dir_path = request.first.path();
-    if(!file_system_.is_exists(dir_path)){
+    auto abs_path = file_system_.get_absolute_path(dir_path);
+    if(!file_system_.is_valid_path(abs_path)){
         HttpResponse response;
-        response.set_status_code(404);
-        response.add_header("Content-Length", "0");
+        response.set_status_code(400);
+        response.set_header("Content-Length", "0");
         return {response, ""};
     }
 
+    if(!file_system_.is_exists(dir_path)){
+        HttpResponse response;
+        response.set_status_code(404);
+        response.set_header("Content-Length", "0");
+        return {response, ""};
+    }
+
+    data_.clear();
     auto entries = file_system_.list_directory(dir_path, 0);
     nlohmann::json j_array = nlohmann::json::array();
     for(const auto& entry : entries){
@@ -94,8 +107,8 @@ response_t MyProto::make_file_list_info(const request_t& request){
 
     HttpResponse response;
     response.set_status_code(200);
-    response.add_header("Content-Type", "application/json");
-    response.add_header("Content-Length", to_string(data_.size()));
+    response.set_header("Content-Type", "application/json");
+    response.set_header("Content-Length", to_string(data_.size()));
     return {response, serialize()};
 }
 fs::path MyProto::upload_file_path(const request_t& request){
@@ -114,8 +127,8 @@ response_t MyProto::copy_file(const request_t& request){
         HttpResponse response;
         response.set_status_code(400);
         set_data("error", "Invalid request: 'src' and 'dst' must be provided");
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -124,8 +137,8 @@ response_t MyProto::copy_file(const request_t& request){
         response.set_status_code(404);
         data_.clear();
         set_data("error", "Source file does not exist");
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -138,8 +151,8 @@ response_t MyProto::copy_file(const request_t& request){
         response.set_status_code(result_code);
         data_.clear();
         set_data("error", response.status_text());
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -147,8 +160,8 @@ response_t MyProto::copy_file(const request_t& request){
     response.set_status_code(result_code);
     data_.clear();
     set_data("success", response.status_text());
-    response.add_header("Content-Type", "application/json");
-    response.add_header("Content-Length", to_string(data_.size()));
+    response.set_header("Content-Type", "application/json");
+    response.set_header("Content-Length", to_string(data_.size()));
     return {response, serialize()};
 }
 response_t MyProto::move_file(const request_t& request){
@@ -162,8 +175,8 @@ response_t MyProto::move_file(const request_t& request){
         response.set_status_code(400);
         data_.clear();
         set_data("error", "Invalid request: 'src' and 'dst' must be provided");
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -172,8 +185,8 @@ response_t MyProto::move_file(const request_t& request){
         response.set_status_code(404);
         data_.clear();
         set_data("error", "Source file does not exist");
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -186,8 +199,8 @@ response_t MyProto::move_file(const request_t& request){
         response.set_status_code(result_code);
         data_.clear();
         set_data("error", response.status_text());
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -195,8 +208,8 @@ response_t MyProto::move_file(const request_t& request){
     response.set_status_code(result_code);
     data_.clear();
     set_data("success", response.status_text());
-    response.add_header("Content-Type", "application/json");
-    response.add_header("Content-Length", to_string(data_.size()));
+    response.set_header("Content-Type", "application/json");
+    response.set_header("Content-Length", to_string(data_.size()));
     return {response, serialize()};
 }
 response_t MyProto::delete_file(const request_t& request){
@@ -208,8 +221,8 @@ response_t MyProto::delete_file(const request_t& request){
         response.set_status_code(400);
         data_.clear();
         set_data("error", "Invalid request: 'file_path' must be provided");
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -218,8 +231,8 @@ response_t MyProto::delete_file(const request_t& request){
         response.set_status_code(404);
         data_.clear();
         set_data("error", "File does not exist");
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -231,8 +244,8 @@ response_t MyProto::delete_file(const request_t& request){
         response.set_status_code(result_code);
         data_.clear();
         set_data("error", response.status_text());
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -240,8 +253,8 @@ response_t MyProto::delete_file(const request_t& request){
     response.set_status_code(result_code);
     data_.clear();
     set_data("success", response.status_text());
-    response.add_header("Content-Type", "application/json");
-    response.add_header("Content-Length", to_string(data_.size()));
+    response.set_header("Content-Type", "application/json");
+    response.set_header("Content-Length", to_string(data_.size()));
     return {response, serialize()};
 }
 response_t MyProto::create_directory(const request_t& request){
@@ -253,8 +266,8 @@ response_t MyProto::create_directory(const request_t& request){
         response.set_status_code(400);
         data_.clear();
         set_data("error", "Invalid request: 'dir_path' must be provided");
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -266,8 +279,8 @@ response_t MyProto::create_directory(const request_t& request){
         response.set_status_code(result_code);
         data_.clear();
         set_data("error", response.status_text());
-        response.add_header("Content-Type", "application/json");
-        response.add_header("Content-Length", to_string(data_.size()));
+        response.set_header("Content-Type", "application/json");
+        response.set_header("Content-Length", to_string(data_.size()));
         return {response, serialize()};
     }
 
@@ -275,7 +288,7 @@ response_t MyProto::create_directory(const request_t& request){
     response.set_status_code(result_code);
     data_.clear();
     set_data("success", response.status_text());
-    response.add_header("Content-Type", "application/json");
-    response.add_header("Content-Length", to_string(data_.size()));
+    response.set_header("Content-Type", "application/json");
+    response.set_header("Content-Length", to_string(data_.size()));
     return {response, serialize()};
 }

@@ -10,11 +10,13 @@ else()
     set(SDKTARGETSYSROOT "" CACHE PATH "Yocto SDK target sysroot path")
 endif()
 
+project(http_file_server C CXX)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_BUILD_TYPE Release)
-
-project(http_file_server C CXX)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
 
 set(SRCS
     src/main.cpp
@@ -33,9 +35,10 @@ set(SRCS
 add_executable(http_file_server ${SRCS})
 
 target_compile_options(http_file_server PRIVATE
-    -w
+    -Wall
+    -Wextra
+    -Wshadow
     $<$<CONFIG:Release>:-O2>
-
 )
 
 # 인클루드 경로
@@ -46,9 +49,21 @@ target_include_directories(http_file_server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include/server
     ${CMAKE_CURRENT_SOURCE_DIR}/include/protocol
     ${CMAKE_CURRENT_SOURCE_DIR}/include/file_system
+)
+target_include_directories(http_file_server SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/asio_1.38.0/include
 )
+
+# GCC can lose Asio's valid aligned_alloc/free pairing while inlining its
+# coroutine-frame allocator. This is a GCC PR 103993 false positive, so keep
+# the diagnostic enabled elsewhere and suppress only the affected sources.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(
+        src/server/http_session.cpp
+        PROPERTIES COMPILE_OPTIONS -Wno-mismatched-new-delete
+    )
+endif()
 
 target_compile_definitions(http_file_server PRIVATE
     ASIO_STANDALONE

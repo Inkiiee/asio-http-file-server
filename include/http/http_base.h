@@ -6,19 +6,36 @@
 #include <cstdint>
 #include <unordered_map>
 #include <algorithm>
+#include <string_view>
+#include <cctype>
+#include <optional>
 
 namespace http_base{
+    inline unsigned char safe_tolower(unsigned char c) noexcept {
+        return static_cast<unsigned char>(std::tolower(c));
+    }
+
     struct CaseInsensitiveHash {
-        std::size_t operator()(std::string key) const {
-            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-            return std::hash<std::string>{}(key);
+        using is_transparent = void; // string_view 검색 허용 (C++20)
+
+        std::size_t operator()(std::string_view sv) const noexcept {
+            // FNV-1a 64-bit 해시 (문자열 복사/힙 할당 없음)
+            std::size_t hash = 14695981039346656037ULL;
+            for (unsigned char c : sv) {
+                hash ^= safe_tolower(c);
+                hash *= 1099511628211ULL;
+            }
+            return hash;
         }
     };
+
     struct CaseInsensitiveEqual {
-        bool operator()(const std::string& a, const std::string& b) const {
-            return a.size() == b.size() &&
-                std::equal(a.begin(), a.end(), b.begin(),
-                    [](char ca, char cb){ return std::tolower(ca) == std::tolower(cb); });
+        using is_transparent = void;
+
+        bool operator()(std::string_view a, std::string_view b) const noexcept {
+            return std::ranges::equal(a, b, [](unsigned char ca, unsigned char cb) {
+                return safe_tolower(ca) == safe_tolower(cb);
+            });
         }
     };
 
@@ -29,6 +46,7 @@ namespace http_base{
     std::string html_escape(const std::string& text);
     std::string get_mime_type(const std::string& extension);
     bool parse_range(const std::string& range_header, std::size_t file_size, std::size_t& start, std::size_t& end);
+    std::optional<std::size_t> str_to_num(const std::string& num_str, int base=10);
 
     class HttpRequest{
     private:
@@ -50,6 +68,7 @@ namespace http_base{
         void set_path(const std::u8string& path);
         void set_version(const std::string& version);
         void add_header(const std::string& key, const std::string& value);
+        void set_header(const std::string& key, const std::string& value);
 
         bool has_header(const std::string& key) const;
         void remove_header(const std::string& key);
@@ -78,6 +97,7 @@ namespace http_base{
         void set_status_code(int status_code);
         void set_status_text(const std::string& status_text);
         void add_header(const std::string& key, const std::string& value);
+        void set_header(const std::string& key, const std::string& value);
 
         bool has_header(const std::string& key) const;
         void remove_header(const std::string& key);

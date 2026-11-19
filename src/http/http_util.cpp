@@ -45,6 +45,12 @@ namespace http_sub_functions{
         return false;
     }
 
+    bool headers_has_token(const vector<string>& values, string_view token){
+        for(const auto& value: values)
+            if(header_has_token(value, token)) return true;
+        return false;
+    }
+
     bool response_must_not_have_body(int status_code){
         return (status_code >= 100 && status_code < 200) ||
             status_code == 204 ||
@@ -57,24 +63,142 @@ namespace http_sub_functions{
         if(size_part.empty())
             throw runtime_error("Invalid chunk size");
 
-        size_t parsed = 0;
-        auto value = stoull(size_part, &parsed, 16);
-        if(parsed != size_part.size())
+        auto value = http_base::str_to_num(size_part, 16);
+        if(!value.has_value())
             throw runtime_error("Invalid chunk size");
 
-        if(value > numeric_limits<size_t>::max())
-            throw runtime_error("Chunk size is too large");
-
-        return static_cast<size_t>(value);
+        return *value;
     }
 }
 
 namespace {
-    inline const std::unordered_set<std::string> only_one_headers_name{
+    using header_rules_type = std::unordered_set<std::string, http_base::CaseInsensitiveHash, http_base::CaseInsensitiveEqual>;
+    inline const header_rules_type only_one_headers_name{
         "host", "content-length", "content-type", "location", 
         "authorization", "proxy-authorization", "from", "max-forwards", "if-unmodified-since", "if-range",
-        "date", "expires", "last-modified", "age", "retry-after"
+        "date", "expires", "last-modified", "age", "retry-after",
+        "destination", "overwrite", "depth", "range", "lock-token"
     };
+    inline const header_rules_type list_valued_headers_name{
+        "accept", "accept-encoding", "accept-language", "accept-charset", "te",
+        "cache-control", "vary", "if-match", "if-none-match", "cache-status", "pragma",
+        "connection", "via", "forwarded", "upgrade", "trailer",
+        "content-encoding", "content-language", "transfer-encoding", "accept-ranges",
+        "access-control-allow-methods", "access-control-allow-headers", "access-control-expose-headers", "access-control-request-headers", "sec-ch-ua",
+        "www-authenticate", "proxy-authenticate", "link", "expect"
+    };
+    inline const header_rules_type special_headers_name{
+        "user-agent", "server"
+    };
+    inline const header_rules_type server_cookie_headers_name{
+        "set-cookie"
+    };
+    inline const header_rules_type client_cookie_headers_name{
+        "cookie"
+    };
+
+    template <typename Container>
+    void parse_list_valued_header_and_add_(Container& container, const string& key, const string& value, char delimiter = ',') {
+        size_t start = 0;
+        const size_t n = value.size();
+        const bool is_link = http_sub_functions::iequals(key, "Link");
+        const bool is_entity_tag = http_sub_functions::iequals(key, "If-Match") ||
+                                   http_sub_functions::iequals(key, "If-None-Match");
+        const char targets[] = {delimiter, '"', is_link ? '<' : '\0', '\0'};
+        // ETag의 백슬래시는 이스케이프가 아닌 태그의 일부다.
+        const char* quote_targets = is_entity_tag ? "\"" : "\\\"";
+
+        while (start < n) {
+            // 1. 앞쪽 공백 건너뛰기
+            start = value.find_first_not_of(" \t", start);
+            if (start == string::npos) break;
+
+            size_t cur = start;
+            bool in_quotes = false;
+
+            // 2. 따옴표와 Link의 <...> 밖에서 구분자를 찾는다.
+            while (cur < n) {
+                if (in_quotes) {
+                    cur = value.find_first_of(quote_targets, cur);
+                    if (cur == string::npos) {
+                        cur = n; // 닫히지 않은 따옴표 처리
+                        break;
+                    }
+                    if (value[cur] == '\\') {
+                        cur = min(cur + 2, n); // 이스케이프 문자(\", \\) 건너뛰기
+                    } else { // '"'
+                        in_quotes = false;
+                        ++cur;
+                    }
+                }
+                else {
+                    cur = value.find_first_of(targets, cur);
+                    if (cur == string::npos) {
+                        cur = n;
+                        break;
+                    }
+                    if (value[cur] == '"') {
+                        in_quotes = true;
+                        ++cur;
+                    }
+                    else if (value[cur] == '<') {
+                        auto link_end = value.find('>', cur + 1);
+                        cur = link_end == string::npos ? n : link_end + 1;
+                    }
+                    else // delimiter 발견
+                        break;
+                }
+            }
+
+            // 3. 뒤쪽 공백 제거 (cur는 delimiter 위치 또는 n)
+            size_t end = cur;
+            while (end > start && (value[end - 1] == ' ' || value[end - 1] == '\t'))
+                --end;
+
+            if (end > start)
+                container.add_header(key, value.substr(start, end - start));
+            start = (cur < n) ? cur + 1 : n;
+        }
+    }
+    template <typename Container>
+    void parse_special_header_and_add(Container& container, const string& key, const string& value) {
+        size_t i = 0;
+        const size_t n = value.size();
+        while (i < n) {
+            // 선행 공백 제거
+            while (i < n && (value[i] == ' ' || value[i] == '\t')) ++i;
+            if (i >= n) break;
+
+            size_t start = i;
+            int paren_depth = 0;
+            while (i < n) {
+                if (value[i] == '\\' && paren_depth > 0 && i + 1 < n) {
+                    i += 2; // 괄호 안 이스케이프 문자 건너뛰기
+                    continue;
+                }
+                if (value[i] == '(') {
+                    // 토큰 중간에 '('가 공백 없이 바로 붙은 경우 앞 토큰 먼저 분리
+                    if (paren_depth == 0 && i > start) {
+                        break;
+                    }
+                    ++paren_depth;
+                }
+                else if (value[i] == ')' && paren_depth > 0) {
+                    --paren_depth;
+                    ++i;
+                    // 최상위 괄호가 닫히면 주석 토큰 즉시 종료
+                    if (paren_depth == 0) {
+                        break;
+                    }
+                    continue;
+                } 
+                else if (paren_depth == 0 && (value[i] == ' ' || value[i] == '\t'))
+                    break; // 괄호 밖의 공백/탭에서 토큰 분리
+                ++i;
+            }
+            container.add_header(key, value.substr(start, i - start));
+        }
+    }
 }
 
 optional<http_base::HttpRequest> Parser::parse_request(){
@@ -83,7 +207,9 @@ optional<http_base::HttpRequest> Parser::parse_request(){
     stringstream stream(buffer_);
     string path_raw, method, version;
     stream >> method >> path_raw >> version;
-
+    if(path_raw.empty() || !path_raw.starts_with("/")) return nullopt;
+    if(version != "HTTP/1.1" && version != "HTTP/1.0") return nullopt;
+    
     request.set_method(method);
     request.set_version(version);
 
@@ -106,24 +232,36 @@ optional<http_base::HttpRequest> Parser::parse_request(){
             line.pop_back();
 
         auto colon_pos = line.find(':');
-        if(colon_pos != string::npos){
-            string key = line.substr(0, colon_pos);
-            string value = line.substr(colon_pos + 1);
-            auto start = value.find_first_not_of(' ');
-            if(start != string::npos)
-                value = value.substr(start);
-            else
-                value.clear();
+        if(colon_pos == string::npos)
+            return nullopt;
+        string key = line.substr(0, colon_pos);
+        if(key.empty() || key.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-.^_`|~") != string::npos)
+            return nullopt;
+        string value = line.substr(colon_pos + 1);
 
-            if(only_one_headers_name.find(key) != only_one_headers_name.end() 
-                && (request.has_header(key) || value.find(',') != string::npos))
-                return nullopt;
+        if(server_cookie_headers_name.find(key) != server_cookie_headers_name.end()) return nullopt;
 
+        // 단일 헤더가 중복으로 들어오는 것을 명시적으로 제한
+        if((only_one_headers_name.find(key) != only_one_headers_name.end()) && request.has_header(key))
+            return nullopt;
+        if(list_valued_headers_name.find(key) != list_valued_headers_name.end())
+            parse_list_valued_header_and_add_(request, key, value, ',');
+        else if(special_headers_name.find(key) != special_headers_name.end())
+            parse_special_header_and_add(request, key, value);
+        else if(client_cookie_headers_name.find(key) != client_cookie_headers_name.end())
+            parse_list_valued_header_and_add_(request, key, value, ';');
+        else
             request.add_header(key, value);
-        }
+
+        if(http_sub_functions::iequals(key, "Transfer-Encoding") && !request.has_header(key))
+            return nullopt;
     }
 
-    if(request.has_header("content-length") && request.has_header("transfer-encoding")) return nullopt;
+    // smuggling 방지용
+    if(request.has_header("content-length") && request.has_header("transfer-encoding")) 
+        return nullopt;
+    if(version == "HTTP/1.1" && !request.has_header("host"))
+        return nullopt;
 
     return request;
 }
@@ -136,6 +274,8 @@ optional<http_base::HttpResponse> Parser::parse_response(){
     int status_code;
     string status_text;
     stream >> version >> status_code;
+    if(version != "HTTP/1.1" && version != "HTTP/1.0") return nullopt;
+
     response.set_version(version);
     response.set_status_code(status_code);
 
@@ -158,11 +298,17 @@ optional<http_base::HttpResponse> Parser::parse_response(){
             else
                 value.clear();
 
-            if(only_one_headers_name.find(key) != only_one_headers_name.end() 
-                && (response.has_header(key) || value.find(',') != string::npos))
-                return nullopt;
+            if(client_cookie_headers_name.find(key) != client_cookie_headers_name.end()) return nullopt;
 
-            response.add_header(key, value);
+            // 단일 헤더가 중복으로 들어오는 것을 명시적으로 제한
+            if((only_one_headers_name.find(key) != only_one_headers_name.end()) && response.has_header(key))
+                return nullopt;
+            if(list_valued_headers_name.find(key) != list_valued_headers_name.end())
+                parse_list_valued_header_and_add_(response, key, value, ',');
+            else if(special_headers_name.find(key) != special_headers_name.end())
+                parse_special_header_and_add(response, key, value);
+            else
+                response.add_header(key, value);
         }
 
         if(response.has_header("content-length") && response.has_header("transfer-encoding")) return nullopt;
@@ -175,20 +321,20 @@ string Maker::make_response(const http_base::HttpResponse& response){
     stringstream stream;
     stream << response.version() << " " << response.status_code() << " " << response.status_text() << "\r\n";
     for(const auto& header : response.headers()){
+        if(header.second.empty()) continue;
         stream << header.first << ": ";
-        for(int i=0; i < header.second.size() - 1; i++)
-            stream << header.second[i] << ", ";
+
+        string delimeter = ", ";
+        if(special_headers_name.find(header.first) != special_headers_name.end())
+            delimeter = " ";
+        else if(server_cookie_headers_name.find(header.first) != server_cookie_headers_name.end())
+            delimeter = "\r\n" + header.first + ": ";
+
+        for(size_t i=0; i + 1 < header.second.size(); i++)
+            stream << header.second[i] << delimeter;
         stream << header.second[header.second.size() - 1] << "\r\n";
     }
     stream << "\r\n";
-
-    cout << "[HTTP] Sending response: " << response.status_code() << " " << response.status_text() << endl;
-    for(const auto& header : response.headers()){
-        cout << "[HTTP] Header: " << header.first << ": ";
-        for(int i=0; i < header.second.size() - 1; i++)
-            cout << header.second[i] << ", ";
-        cout << header.second[header.second.size() - 1] << endl;
-    }
     return stream.str();
 }
 
@@ -197,9 +343,17 @@ string Maker::make_request(const http_base::HttpRequest& request){
     string path = string(request.path().begin(), request.path().end());
     stream << request.method() << " " << path << " " << request.version() << "\r\n";
     for(const auto& header : request.headers()){
+        if(header.second.empty()) continue;
         stream << header.first << ": ";
-        for(int i=0; i < header.second.size() - 1; i++)
-            stream << header.second[i] << ", ";
+
+        string delimeter = ", ";
+        if(special_headers_name.find(header.first) != special_headers_name.end())
+            delimeter = " ";
+        else if(client_cookie_headers_name.find(header.first) != client_cookie_headers_name.end())
+            delimeter = "; ";
+
+        for(size_t i=0; i + 1 < header.second.size(); i++)
+            stream << header.second[i] << delimeter;
         stream << header.second[header.second.size() - 1] << "\r\n";
     }
     stream << "\r\n";

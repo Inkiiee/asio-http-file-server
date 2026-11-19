@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <optional>
+#include <vector>
 
 namespace http_parser{
     class Parser{
@@ -23,6 +24,7 @@ namespace http_sub_functions{
     bool iequals(std::string_view lhs, std::string_view rhs);
     std::string trim_copy(std::string_view value);
     bool header_has_token(const std::string& value, std::string_view token);
+    bool headers_has_token(const std::vector<std::string>& values, std::string_view token);
     bool response_must_not_have_body(int status_code);
     std::size_t parse_chunk_size_line(const std::string& line);
 }

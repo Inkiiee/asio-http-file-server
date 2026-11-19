@@ -1,4 +1,9 @@
 #include "http_base.h"
+#include "http_util.h"
+
+#include <charconv>
+#include <optional>
+#include <string>
 
 using namespace http_base;
 
@@ -15,8 +20,9 @@ void HttpRequest::set_version(const std::string& version) { version_ = version; 
 const header_map& HttpRequest::headers() const { return headers_; }
 bool HttpRequest::has_header(const std::string& key) const { return headers_.find(key) != headers_.end(); }
 const std::vector<std::string>& HttpRequest::get_header(const std::string& key) const {
+    static const std::vector<std::string> empty = {""};
     auto it = headers_.find(key);
-    return it != headers_.end() ? it->second : std::vector<std::string>{""};
+    return it != headers_.end() ? it->second : empty;
 }
 void HttpRequest::remove_header(const std::string& key) { headers_.erase(key); }
 void HttpRequest::add_header(const std::string& key, const std::string& value) {
@@ -24,15 +30,12 @@ void HttpRequest::add_header(const std::string& key, const std::string& value) {
         headers_[key] = std::vector<std::string>();
         headers_[key].reserve(5);
     }
-
-    auto start = value.find_first_not_of(' ');
-    auto pos = value.length();
-    while((pos = value.find(',', start)) != std::string::npos){
-        int len = pos - start;
-        headers_[key].push_back(value.substr(start, len));
-        start = value.find_first_not_of(pos + 1, ' ');
-    }
-    headers_[key].push_back(value.substr(start));
+    headers_[key].push_back(http_sub_functions::trim_copy(value));
+}
+void HttpRequest::set_header(const std::string& key, const std::string& value){
+    if(headers_.find(key) != headers_.end())
+        headers_[key].clear();
+    add_header(key, value);
 }
 void HttpRequest::clear_headers() { headers_.clear(); }
 
@@ -46,8 +49,9 @@ int HttpResponse::status_code() const { return status_code_; }
 const std::string& HttpResponse::status_text() const { return status_text_; }
 const header_map& HttpResponse::headers() const { return headers_; }
 const std::vector<std::string>& HttpResponse::get_header(const std::string& key) const {
+    static const std::vector<std::string> empty = {""};
     auto it = headers_.find(key);
-    return it != headers_.end() ? it->second : std::vector<std::string>{""};
+    return it != headers_.end() ? it->second : empty;
 }
 void HttpResponse::set_version(const std::string& version){ version_ = version; }
 void HttpResponse::set_status_code(int status_code){ status_code_ = status_code; status_text_ = get_status_text_(status_code); }
@@ -57,15 +61,12 @@ void HttpResponse::add_header(const std::string& key, const std::string& value){
         headers_[key] = std::vector<std::string>();
         headers_[key].reserve(5);
     }
-
-    auto start = value.find_first_not_of(' ');
-    auto pos = value.length();
-    while((pos = value.find(',', start)) != std::string::npos){
-        int len = pos - start;
-        headers_[key].push_back(value.substr(start, len));
-        start = value.find_first_not_of(pos + 1, ' ');
-    }
-    headers_[key].push_back(value.substr(start));
+    headers_[key].push_back(http_sub_functions::trim_copy(value));
+}
+void HttpResponse::set_header(const std::string& key, const std::string& value){
+    if(headers_.find(key) != headers_.end())
+        headers_[key].clear();
+    add_header(key, value);
 }
 bool HttpResponse::has_header(const std::string& key) const{ return headers_.find(key) != headers_.end(); }
 void HttpResponse::remove_header(const std::string& key) { headers_.erase(key); }
@@ -355,24 +356,31 @@ namespace http_base{
         std::string start_str = range_spec.substr(0, dash);
         std::string end_str   = range_spec.substr(dash + 1);
 
-        try {
-            if(start_str.empty()){
-                // bytes=-suffix  →  last N bytes
-                if(end_str.empty()) return false;
-                uintmax_t suffix = stoull(end_str);
-                if(suffix == 0) return false;
-                if(suffix > file_size) suffix = file_size;
-                start = file_size - suffix;
-                end   = file_size - 1;
-            } else {
-                start = stoull(start_str);
-                if(end_str.empty())
-                    end = file_size - 1;   // bytes=start-  →  to EOF
-                else
-                    end = stoull(end_str);  // bytes=start-end
+        if(start_str.empty()){
+            // bytes=-suffix  →  last N bytes
+            if(end_str.empty()) return false;
+
+            auto value = str_to_num(end_str);
+            if(!value.has_value()) return false;
+
+            size_t suffix = *value;
+            if(suffix == 0) return false;
+            if(suffix > file_size) suffix = file_size;
+            start = file_size - suffix;
+            end = file_size - 1;
+        } 
+        else {
+            auto start_value = str_to_num(start_str);
+            if(!start_value.has_value()) return false;
+
+            start = *start_value;
+            if(end_str.empty())
+                end = file_size - 1;   // bytes=start-  →  to EOF
+            else{
+                auto end_value = str_to_num(end_str);
+                if(!end_value.has_value()) return false;
+                end = *end_value;
             }
-        } catch(...){
-            return false;
         }
 
         if(start > end || start >= file_size)
@@ -381,5 +389,14 @@ namespace http_base{
             end = file_size - 1;
 
         return true;
+    }
+
+    std::optional<size_t> str_to_num(const std::string& num_str, int base){
+        std::size_t result;
+        auto [p, ec] = std::from_chars(num_str.data(), num_str.data() + num_str.length(), result, base);
+        if(p != (num_str.data() + num_str.length()) || ec != std::errc())
+            return std::nullopt;
+
+        return result;
     }
 }

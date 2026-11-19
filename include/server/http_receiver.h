@@ -24,34 +24,42 @@ namespace http_file_server{
     class HttpReceiver{
     public:
         HttpReceiver(asio::ip::tcp::socket* socket, std::size_t io_chunk_size = 8192): psocket_(socket), io_chunk_size_(io_chunk_size){}
-        asio::awaitable<bool> read_request(http_base::HttpRequest& request, bool& is_need_close);
+        asio::awaitable<bool> read_request(http_base::HttpRequest& request);
+        bool body_complete() const noexcept { return body_framing_ == BodyFraming::none; }
+        asio::awaitable<void> discard_body();
         virtual ~HttpReceiver() = default;
 
         template<typename T>
-        asio::awaitable<void> read_body(const http_base::HttpRequest& request, T& body, std::size_t& content_length);
+        asio::awaitable<void> read_body(T& body, std::size_t& content_length);
     private:
+        enum class BodyFraming { none, fixed, chunked };
         std::string buf_;
         asio::ip::tcp::socket* psocket_;
         std::size_t io_chunk_size_;
+        BodyFraming body_framing_ = BodyFraming::none;
+        std::size_t body_length_ = 0;
 
         asio::awaitable<void> read_until(std::string& buffer, const std::string& delimiter);
         template<typename T>
         asio::awaitable<void> read_chunked_body(T& body, std::size_t& content_length);
         template<typename T>
         asio::awaitable<void> read_fixed_body(T& body, std::size_t content_length);
+        template<typename T>
+        static void append_body(T& body, const char* data, std::size_t size);
     };
 
     template<typename T>
-    asio::awaitable<void> HttpReceiver::read_body(const http_base::HttpRequest& request, T& body, std::size_t& content_length){
-        if(request.has_header("Transfer-Encoding") && http_sub_functions::header_has_token(request.get_header("Transfer-Encoding")[0], "chunked")){
+    asio::awaitable<void> HttpReceiver::read_body(T& body, std::size_t& content_length){
+        content_length = 0;
+        if(body_framing_ == BodyFraming::chunked){
             co_await read_chunked_body(body, content_length);
         }
-        else if(request.has_header("Content-Length")){
-            content_length = std::stoul(request.get_header("Content-Length")[0]);
-            co_await read_fixed_body(body, content_length);
+        else if(body_framing_ == BodyFraming::fixed){
+            co_await read_fixed_body(body, body_length_);
+            content_length = body_length_;
         }
-        content_length = 0;
-        co_return;
+        body_framing_ = BodyFraming::none;
+        body_length_ = 0;
     }
 
     template<typename T>
@@ -75,22 +83,12 @@ namespace http_file_server{
             if(chunk_size > std::numeric_limits<std::size_t>::max() - content_length)
                 throw std::runtime_error("Chunked body is too large");
 
-            std::string chunk_data;
-            co_await read_fixed_body(chunk_data, chunk_size);
+            co_await read_fixed_body(body, chunk_size);
 
             std::string chunk_crlf;
-            co_await read_until(chunk_crlf, "\r\n");
-            if(!chunk_crlf.empty())
+            co_await read_fixed_body(chunk_crlf, 2);
+            if(chunk_crlf != "\r\n")
                 throw std::runtime_error("Malformed chunk data");
-
-            if constexpr (std::is_same_v<T, std::string>)
-                body += chunk_data;
-            else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>> || std::is_same_v<T, std::vector<char>>)
-                body.insert(body.end(), chunk_data.begin(), chunk_data.end());
-            else if constexpr (std::is_base_of_v<std::ostream, T>)
-                body.write(chunk_data.data(), chunk_data.size());
-            else
-                throw std::runtime_error("Unsupported body type for read_chunked_body");
 
             content_length += chunk_size;
         }
@@ -98,45 +96,33 @@ namespace http_file_server{
 
     template<typename T>
     asio::awaitable<void> HttpReceiver::read_fixed_body(T& body, std::size_t content_length){
-        std::size_t bytes_to_read = content_length;
-        std::size_t bytes_read = 0;
-
-        // 버퍼에 이미 남아있는 데이터 먼저 처리
-        if(!buf_.empty()){
-            std::size_t buffered = std::min(buf_.size(), bytes_to_read);
-            std::string chunk_data(buf_.begin(), buf_.begin() + buffered);
-            buf_.erase(0, buffered);
-            if constexpr (std::is_same_v<T, std::string>)
-                body += chunk_data;
-            else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>> || std::is_same_v<T, std::vector<char>>)
-                body.insert(body.end(), chunk_data.begin(), chunk_data.end());
-            else if constexpr (std::is_base_of_v<std::ostream, T>)
-                body.write(chunk_data.data(), chunk_data.size());
-            else
-                throw std::runtime_error("Unsupported body type for read_fixed_body");
-            bytes_read += buffered;
-        }
-
-        while(bytes_read < bytes_to_read){
-            std::size_t chunk_size = std::min(io_chunk_size_, bytes_to_read - bytes_read);
-            auto [ec, bytes_transferred] = co_await asio::async_read(*psocket_, asio::dynamic_buffer(buf_), asio::transfer_exactly(chunk_size), asio::as_tuple);
-            if(ec){
-                throw std::runtime_error("Error reading fixed body: " + ec.message());
+        while(content_length > 0){
+            if(buf_.empty()){
+                auto chunk_size = std::min(io_chunk_size_, content_length);
+                auto [ec, bytes_transferred] = co_await asio::async_read(*psocket_, asio::dynamic_buffer(buf_), asio::transfer_exactly(chunk_size), asio::as_tuple);
+                if(ec || bytes_transferred == 0)
+                    throw std::runtime_error("Error reading fixed body: " + ec.message());
             }
 
-            std::string chunk_data(buf_.begin(), buf_.begin() + bytes_transferred);
-            buf_.erase(0, bytes_transferred);
-            if constexpr (std::is_same_v<T, std::string>)
-                body += chunk_data;
-            else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>> || std::is_same_v<T, std::vector<char>>)
-                body.insert(body.end(), chunk_data.begin(), chunk_data.end());
-            else if constexpr (std::is_base_of_v<std::ostream, T>)
-                body.write(chunk_data.data(), chunk_data.size());
-            else
-                throw std::runtime_error("Unsupported body type for read_fixed_body");
-
-            bytes_read += bytes_transferred;
+            auto buffered = std::min(buf_.size(), content_length);
+            append_body(body, buf_.data(), buffered);
+            buf_.erase(0, buffered);
+            content_length -= buffered;
         }
+    }
+
+    template<typename T>
+    void HttpReceiver::append_body(T& body, const char* data, std::size_t size){
+        if constexpr (std::is_same_v<T, std::nullptr_t>)
+            return;
+        else if constexpr (std::is_same_v<T, std::string>)
+            body.append(data, size);
+        else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>> || std::is_same_v<T, std::vector<char>>)
+            body.insert(body.end(), data, data + size);
+        else if constexpr (std::is_base_of_v<std::ostream, T>)
+            body.write(data, size);
+        else
+            throw std::runtime_error("Unsupported body type");
     }
 }
 
