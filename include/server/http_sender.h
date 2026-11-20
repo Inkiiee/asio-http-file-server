@@ -24,7 +24,7 @@ namespace http_file_server{
     class HttpSender{
     public:
         HttpSender(asio::ip::tcp::socket* socket, std::size_t io_chunk_size = 8192): psocket_(socket), io_chunk_size_(io_chunk_size){}
-        virtual ~HttpSender() = default;
+        ~HttpSender() = default;
 
         asio::awaitable<void> send_no_body_response(const http_base::HttpResponse& response);
         template<typename T>

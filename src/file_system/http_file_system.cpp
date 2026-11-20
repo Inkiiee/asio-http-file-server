@@ -352,9 +352,16 @@ HttpFileEntry HttpFileSystem::get_file_entry(const fs::path& path){
     file_entry.extension = abs_path.extension().string();
 
     auto last_write_time = fs::last_write_time(abs_path);
-    auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-        last_write_time - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
-    auto tt = std::chrono::system_clock::to_time_t(sctp);
+    auto sctp = [](auto file_time){
+        using FileClock = typename decltype(file_time)::clock;
+        using SystemDuration = std::chrono::system_clock::duration;
+        if constexpr (requires { FileClock::to_sys(file_time); })
+            return std::chrono::time_point_cast<SystemDuration>(FileClock::to_sys(file_time));
+        else
+            return std::chrono::time_point_cast<SystemDuration>(
+                file_time - FileClock::now() + std::chrono::system_clock::now());
+    }(last_write_time);
+    auto tt = std::min(std::chrono::system_clock::to_time_t(sctp), std::time(nullptr));
     std::tm tm_result;
     if(safe_gmtime(&tt, &tm_result)){
         std::ostringstream oss;

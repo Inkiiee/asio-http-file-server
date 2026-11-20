@@ -43,7 +43,8 @@ namespace {
     }
 }
 
-HttpSession::HttpSession(tcp::socket socket): socket_(move(socket)), sender_(&socket_), receiver_(&socket_) {}
+HttpSession::HttpSession(tcp::socket socket, HttpReadLimits limits)
+    : socket_(move(socket)), sender_(&socket_), receiver_(&socket_, 8192, limits) {}
 
 void HttpSession::set_root_path(const fs::path& path){
     web_dav_proto_.set_root_path(path);
@@ -67,12 +68,17 @@ void HttpSession::stop(){
 //  Main session handler
 // ============================================================
 awaitable<void> HttpSession::handle_session(){
+    optional<int> read_error_status;
     try {
         while(true){
             http_base::HttpRequest request;
-            if(!co_await receiver_.read_request(request)){
+            auto result = co_await receiver_.read_request(request);
+            if(result == ReadResult::bad_request){
                 close_after_response_ = true;
                 co_await send_no_body_response(400);
+                break;
+            }
+            else if(result == ReadResult::closed){
                 break;
             }
 
@@ -84,10 +90,23 @@ awaitable<void> HttpSession::handle_session(){
             }
         }
     }
+    catch(const HttpReadError& e){
+        read_error_status = e.status_code();
+        cerr << "[HTTP] Request read failed: " << e.what() << endl;
+    }
     catch(const exception& e){
         cerr << "[HTTP] Session error: " << e.what() << endl;
     }
 
+    if(read_error_status){
+        close_after_response_ = true;
+        try{
+            co_await send_no_body_response(*read_error_status);
+        }
+        catch(const exception& e){
+            cerr << "[HTTP] Error sending read failure response: " << e.what() << endl;
+        }
+    }
     stop();
 }
 
@@ -211,18 +230,44 @@ awaitable<void> HttpSession::process_get_request(const http_base::HttpRequest& r
             co_return;
         }
 
-        if(!fs::exists(path)){
+        if(!fs::is_regular_file(path)){
             co_await send_no_body_response(404);
             co_return;
         }
 
-        auto file_size = fs::file_size(path);
+        const auto entry = web_dav_proto_.get_file_info(request.path());
+        const auto file_size = entry.size;
+        const auto& etag = entry.etag;
+        const auto last_modified = web_dav_proto_.parse_http_date(entry.last_modified);
         http_base::HttpResponse response;
         response.set_status_code(200);
         response.set_header("Content-Length", std::to_string(file_size));
         response.set_header("Content-Type", http_base::get_mime_type(path.extension().string()));
         response.set_header("Accept-Ranges", "bytes");
-        response.set_header("ETag", web_dav_proto_.get_etag(request.path()));
+        response.set_header("ETag", etag);
+        if(last_modified)
+            response.set_header("Last-Modified", entry.last_modified);
+
+        // 조건부 GET. If-None-Match는 weak 비교를 쓴다. (RFC 9110 13.1.2)
+        // Range보다 먼저 평가해야 한다. (RFC 9110 13.2.2)
+        bool not_modified_by_request = false;
+        if(request.has_header("If-None-Match")){
+            not_modified_by_request = matches_etag(request.get_header("If-None-Match"), etag, true, ETagComparison::weak);
+        }
+        else if(last_modified && request.has_header("If-Modified-Since")){
+            const auto& dates = request.get_header("If-Modified-Since");
+            auto since = dates.size() == 1 ? web_dav_proto_.parse_http_date(dates.front()) : nullopt;
+            not_modified_by_request = since && *last_modified <= *since;
+        }
+        if(not_modified_by_request){
+            HttpResponse not_modified;
+            not_modified.set_status_code(304);
+            not_modified.set_header("ETag", etag);
+            if(last_modified)
+                not_modified.set_header("Last-Modified", entry.last_modified);
+            co_await send_no_body_response(not_modified);
+            co_return;
+        }
 
         std::ifstream file(path, std::ios::binary);
         if(!file){
@@ -230,7 +275,12 @@ awaitable<void> HttpSession::process_get_request(const http_base::HttpRequest& r
             co_return;
         }
 
-        if(request.has_header("Range")){
+        // 파일 수정 시각만으로는 같은 초에 여러 번 수정됐는지 판별할 수 없다.
+        // If-Range에는 현재의 강한 ETag가 정확히 일치할 때만 부분 응답을 보낸다.
+        const auto& if_range = request.get_header("If-Range");
+        const bool if_range_matches = !request.has_header("If-Range") ||
+            (if_range.size() == 1 && !etag.empty() && !etag.starts_with("W/") && if_range.front() == etag);
+        if(request.method() == "GET" && request.has_header("Range") && if_range_matches){
             size_t start, end;
             if(http_base::parse_range(request.get_header("Range")[0], file_size, start, end)){
                 response.set_status_code(206);
@@ -238,16 +288,12 @@ awaitable<void> HttpSession::process_get_request(const http_base::HttpRequest& r
                 size_t content_length = end - start + 1;
                 response.set_header("Content-Length", std::to_string(content_length));
 
-                if(request.method() == "HEAD"){
-                    co_await send_no_body_response(response);
-                    co_return;
-                }
-
                 file.seekg(start);
                 co_await send_response(response, file);
             }
             else{
                 response.set_status_code(416);
+                response.set_header("Content-Range", "bytes */" + std::to_string(file_size));
                 response.set_header("Content-Length", "0");
                 co_await send_no_body_response(response);
             }
@@ -330,6 +376,9 @@ awaitable<void> HttpSession::process_put_request(const http_base::HttpRequest& r
 
         if(failure)
             status_code = *failure;
+    }
+    catch(const HttpReadError&){
+        throw;
     }
     catch(const exception& e){
         cerr << "[HTTP] PUT Failed: " << e.what() << endl;

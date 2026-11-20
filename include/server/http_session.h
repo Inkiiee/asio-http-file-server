@@ -40,7 +40,7 @@ namespace http_file_server{
             co_await receiver_.read_body(body, content_length);
         }
     public:
-        HttpSession(asio::ip::tcp::socket socket);
+        HttpSession(asio::ip::tcp::socket socket, HttpReadLimits limits = {});
 
         void start();
         void stop();

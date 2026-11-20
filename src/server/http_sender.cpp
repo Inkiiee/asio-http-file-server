@@ -13,7 +13,7 @@ using asio::awaitable;
 
 awaitable<void> HttpSender::send_no_body_response(const HttpResponse& response){
     auto headers = response;
-    if(headers.status_code() < 200 || headers.status_code() == 204){
+    if(http_sub_functions::response_must_not_have_body(response.status_code())){
         headers.remove_header("Content-Length");
         headers.remove_header("Transfer-Encoding");
     }

@@ -7,7 +7,7 @@ C++20과 standalone Asio 기반의 간단한 HTTP 파일 서버입니다. 지정
 - 파일 다운로드: `GET`
 - 파일 업로드/덮어쓰기: `PUT`
 - 디렉터리 목록 조회: `GET` 요청 시 JSON 배열 반환
-- Range Request 지원: `bytes=start-end`, `bytes=start-`, `bytes=-suffix`
+- Range Request 지원: `bytes=start-end`, `bytes=start-`, `bytes=-suffix`, `If-Range`의 강한 ETag 비교
 - 파일 MIME 타입 자동 판별
 - UTF-8 URL 디코딩/인코딩
 - 루트 디렉터리 밖 접근 차단
@@ -62,6 +62,8 @@ cmake --build .
 ./http_file_server 0.0.0.0 8080
 ./http_file_server 0.0.0.0 8080 /home/user/files
 ```
+
+기본 요청 제한은 헤더 16 KiB, `PUT` 본문 1 GiB, 그 외 본문 1 MiB입니다. 청크 크기 줄은 4 KiB, 트레일러는 최대 32개와 총 16 KiB로 제한됩니다. 헤더를 받거나 다음 요청을 기다리는 시간은 15초, 본문 한 번의 읽기는 30초, 본문 전체 수신은 15분으로 제한됩니다. 기본값은 `HttpReadLimits`에서 설정합니다.
 
 ## 기본 HTTP 사용법
 

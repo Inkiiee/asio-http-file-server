@@ -163,6 +163,8 @@ namespace http_file_system{
 
         inline TempName get_temp_path(const std::filesystem::path& path){ return TempName{path}; }
         inline std::optional<std::time_t> parse_http_date(const std::string& value) {
+            if(value.size() != 29 || !value.ends_with(" GMT"))
+                return std::nullopt;
             std::tm tm = {};
             std::istringstream iss(value);
             iss.imbue(std::locale::classic());
