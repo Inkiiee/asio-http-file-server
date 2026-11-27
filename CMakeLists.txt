@@ -34,12 +34,20 @@ set(SRCS
 
 add_executable(http_file_server ${SRCS})
 
-target_compile_options(http_file_server PRIVATE
-    -Wall
-    -Wextra
-    -Wshadow
-    $<$<CONFIG:Release>:-O2>
-)
+if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+    target_compile_options(http_file_server PRIVATE
+        /W4          # -Wall -Wextra 에 대응하는 실무 표준 경고 수준
+        /permissive- # -Wpedantic 에 대응하는 엄격한 표준 준수
+        /w14456      # -Wshadow 에 대응하는 변수 가림 경고 (로컬 변수 숨김)
+    )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(http_file_server PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wshadow
+    )
+endif()
 
 # 인클루드 경로
 target_include_directories(http_file_server PRIVATE
